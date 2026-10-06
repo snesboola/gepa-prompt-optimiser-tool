@@ -1,0 +1,6 @@
+{"input": "What is the capital of France?", "reference": "Paris"}
+{"input": "What is the capital of Japan?", "reference": "Tokyo"}
+{"input": "What is the capital of Canada?", "reference": "Ottawa"}
+{"input": "What is the capital of Australia?", "reference": "Canberra"}
+{"input": "What is the capital of Egypt?", "reference": "Cairo"}
+{"input": "What is the capital of Brazil?", "reference": "Brasilia"}

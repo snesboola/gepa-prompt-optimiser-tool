@@ -23,6 +23,28 @@ meaning unchanged):
 Everything in this repo exists to serve that five-step journey. Nothing
 else.
 
+## What kinds of prompts this optimizes
+
+Not just verifiable QA/extraction tasks. Explicitly in scope, same
+architecture for all three:
+
+- **Verifiable tasks** (QA, extraction, classification) — a known-correct
+  answer exists per row; metric is `exact_match`/`keyword_presence` against
+  a `reference` field. `examples/qa_demo` demonstrates this.
+- **LLM-as-judge prompts** — the prompt *being optimized* is itself a judge
+  (evaluates/scores other content). Dataset rows are labeled calibration
+  examples (content + known-correct verdict); metric compares the judge's
+  verdict to that label with plain `exact_match`/`keyword_presence` — no
+  recursion into another judge call needed.
+- **Open-ended writing/creative tasks** — no single correct output exists;
+  metric is `llm_judge`, scoring against stated criteria via a separate
+  `judge_lm` call. Verified working end-to-end (fake task/judge LMs, no API
+  calls) for a no-`reference` writing task: candidate evolves a "write X"
+  system prompt, `judge_lm` rates the output, score + rationale flow
+  correctly into the reflective dataset. No example committed for this path
+  yet — worth adding one (e.g. `examples/writing_judge_demo/`) before
+  relying on it against a real model.
+
 ## Decisions made since, and why
 
 These came out of the vision as the architecture got built, each one a

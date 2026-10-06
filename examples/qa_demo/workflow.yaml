@@ -1,0 +1,11 @@
+# Minimal single-node workflow: one system prompt, optimized by GEPA.
+nodes:
+  - id: system_prompt
+    type: llm
+    optimize: system
+    system: |
+      You are a question-answering assistant. Answer in one short sentence.
+    user: |
+      $input
+
+final_output: system_prompt
