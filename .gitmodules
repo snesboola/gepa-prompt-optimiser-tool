@@ -1,0 +1,3 @@
+[submodule "reference/gepa-ai-gepa"]
+	path = reference/gepa-ai-gepa
+	url = https://github.com/snesboola/gepa_optimizer.git
