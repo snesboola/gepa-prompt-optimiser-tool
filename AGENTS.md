@@ -38,9 +38,46 @@ architecture for all three:
   recursion into another judge call needed.
   `examples/hallucination_judge_demo` demonstrates this (optimizing a
   hallucination-detection judge against labeled grounded/hallucinated rows);
-  verified logically with fake stand-in judges (a hedgy one scoring 4/8, a
-  strict one scoring 7/8) — not yet run against a real model (blocked on
-  today's Gemini free-tier quota, see below).
+  verified logically with fake stand-in judges -- not yet run against a real
+  model (blocked on today's Gemini free-tier quota, see below).
+
+  **If the real goal is recall/precision** (e.g. "catch most real
+  hallucinations, don't cry wolf too often"), not raw accuracy: recall and
+  precision are aggregate confusion-matrix numbers, not something any
+  single `score(row, trace)` call can produce -- GEPA scores one row at a
+  time. What actually works and is built in: the `classification` metric
+  template (`gepa-opt suggest-metric --type classification`) scores each row
+  with *asymmetric* penalties -- a missed positive (false negative) costs
+  more than a false alarm (false positive) by default, tunable via
+  `FN_PENALTY`/`FP_PENALTY` -- which is the per-example signal GEPA can
+  actually act on to push toward higher recall without ignoring precision.
+  Separately, `metrics.classification_report()` re-evaluates the seed and
+  the winning candidate over the full valset after optimization and
+  computes the *real* TP/FP/TN/FN/recall/precision/F1 (wired into
+  `runner.py`, rendered in `report.md`'s "Real recall / precision" section)
+  -- so the user sees the actual number they asked about, not just trust
+  that the proxy score correlates with it. Verified end-to-end with fake
+  judges: a seed that always says "grounded" scores recall=0.0; a stricter
+  judge scores recall=1.0, precision=0.8, F1=0.89 on the same 8-row dataset.
+
+  The per-example proxy's main weakness is noise: GEPA's own minibatch
+  default (3 rows per reflection step) is a random sample, and a 3-row
+  sample of a recall-sensitive metric frequently contains zero
+  positive-labeled rows at all, making the sampled signal unstable. Good
+  question from the user cut right to this: *if the dataset is small,
+  why not just use the whole thing as the minibatch every time?* -- and
+  that's exactly right, and wireable: `reflection_minibatch_size` is a real
+  `gepa.optimize()` parameter we simply weren't passing. `runner.py` now
+  defaults it to the full training set when `len(trainset) <=
+  SMALL_DATASET_THRESHOLD` (25), overridable via
+  `gepa.config.yaml`'s `reflection_minibatch_size` field. Verified against
+  the real installed `EpochShuffledBatchSampler`
+  (`reference/gepa-ai-gepa/src/gepa/strategies/batch_sampler.py`): when
+  `minibatch_size == trainset_size`, every single call returns all rows,
+  every iteration -- confirmed directly, not just read off the source.
+  This doesn't change the mean-vs-ratio math above (the per-row proxy is
+  still a proxy, not literal recall/precision), it just removes the sampling
+  noise on top of it for small datasets.
 - **Open-ended writing/creative tasks** — no single correct output exists;
   metric is `llm_judge`, scoring against stated criteria via a separate
   `judge_lm` call. Verified working end-to-end (fake task/judge LMs, no API
@@ -49,6 +86,18 @@ architecture for all three:
   correctly into the reflective dataset. No example committed for this path
   yet — worth adding one (e.g. `examples/writing_judge_demo/`) before
   relying on it against a real model.
+- **Compound criteria** — a hard, checkable requirement (must mention an
+  exact phrase) mixed with a vaguer qualitative one (must "capture industry
+  detail") in the *same* output. No single template does both; the
+  `composite` metric template composes them instead: a hard phrase-presence
+  gate that fails immediately (score 0, judge never consulted) regardless
+  of quality elsewhere, and only once that passes does a `judge_lm` call
+  score the qualitative part. Verified end-to-end with fake task/judge LMs
+  (`tests/test_metrics.py`): an output missing the required phrase scores
+  0.0 even when the (fake) judge would have given it 0.95 -- the gate
+  genuinely overrides the judge, not just averages with it; a present-phrase
+  output then correctly gets judged low for generic filler (0.2) vs. high
+  for real specific detail (0.9).
 
 ## Decisions made since, and why
 

@@ -70,8 +70,18 @@ This scaffolds:
 Then draft and approve a scoring function:
 
 ```bash
-gepa-opt suggest-metric --type exact_match   # or keyword_presence, llm_judge
+gepa-opt suggest-metric --type exact_match   # or keyword_presence, llm_judge, classification, composite
 ```
+
+`classification` is the one to reach for when the goal is phrased in terms
+of recall/precision (e.g. "catch most real hallucinations without too many
+false alarms") rather than raw accuracy — see the worked example below for
+why that needs a different approach than `exact_match`. `composite` is for
+criteria that mix a hard requirement (must mention an exact phrase) with a
+vaguer qualitative one (must "capture industry detail") in the same
+output — it hard-gates on the exact requirement first, then only runs an
+`llm_judge`-style call for the qualitative part once that gate passes, so
+the hard requirement can never be traded away for a nicer-sounding answer.
 
 This writes an editable `metric.py` with a `score(row, trace) -> (score, feedback)`
 function, pre-filled from your stated goal/criteria. **Read it. Edit the
@@ -151,39 +161,53 @@ final_output: judge
 
 **3. Draft and approve the scoring function:**
 
+The goal here isn't just "match the label" — it's *catch most real
+hallucinations without too many false alarms*, i.e. recall and precision
+specifically. Those are aggregate, whole-dataset numbers; no single
+`score(row, trace)` call can compute them, since GEPA scores one row at a
+time. The `classification` template is built for exactly this: it scores
+each row with asymmetric penalties (missing a real hallucination costs
+more than a false alarm, by default) as the closest per-example signal
+GEPA can act on, and separately reports the *real* recall/precision/F1 for
+the winning prompt after the fact.
+
 ```bash
-gepa-opt suggest-metric --type keyword_presence
+gepa-opt suggest-metric --type classification
 ```
 
-The scaffold is generic; the real metric needs hand-editing to actually
-compare the judge's verdict to `row["label"]` and tolerate phrasing
-("not grounded" == `HALLUCINATED`) while still scoring 0 for a hedging,
-ambiguous answer — hedging is exactly the failure mode you want GEPA to
-evolve away from:
+The scaffold needs hand-editing to set the actual positive label and
+negative-class check, and to tune the recall/precision tradeoff:
 
 ```python
-def score(row: dict, trace: dict) -> tuple[float, str]:
-    expected = row["label"].strip().upper()
-    output = str(trace["final_output"]).upper()
+POSITIVE_LABEL = "HALLUCINATED"
+FN_PENALTY = 0.0  # missed a real hallucination -- the costlier mistake for this task
+FP_PENALTY = 0.4  # false alarm on a grounded answer -- still bad, but softer
 
+
+def classify(row: dict, trace: dict) -> str:
+    output = str(trace["final_output"]).upper()
     mentions_not_grounded = "HALLUCINAT" in output or "NOT GROUNDED" in output
     mentions_grounded = "GROUNDED" in output and not mentions_not_grounded
-    predicted = (
-        "HALLUCINATED" if mentions_not_grounded
-        else "GROUNDED" if mentions_grounded
-        else "UNCLEAR"
-    )
+    if mentions_not_grounded:
+        return "HALLUCINATED"
+    if mentions_grounded:
+        return "GROUNDED"
+    return "UNCLEAR"
 
+
+def score(row: dict, trace: dict) -> tuple[float, str]:
+    expected = row["label"].strip().upper()
+    predicted = classify(row, trace)
     if predicted == expected:
         return 1.0, f"Correctly judged as {expected}."
-    return 0.0, (
-        f"Expected {expected}, got {predicted} from raw output {trace['final_output']!r}. "
-        "If verbose/hedging, demand a single unambiguous word as the entire response."
-    )
+    if expected == POSITIVE_LABEL:
+        return FN_PENALTY, f"MISSED a real hallucination (got {predicted})."
+    return FP_PENALTY, f"False alarm on a grounded answer (got {predicted})."
 ```
 
-This is the approval gate: read the logic above, confirm it actually matches
-what "correct" means for your judge, before running anything.
+This is the approval gate: read the logic above, confirm `FN_PENALTY`/
+`FP_PENALTY` actually reflect which mistake you care about more, before
+running anything.
 
 **4. Run it:**
 
@@ -198,14 +222,17 @@ pending a Gemini free-tier quota reset as of this writing): the seed prompt
 ("Decide whether the ANSWER is fully supported by the CONTEXT") leaves the
 output format open, so a judge that hedges ("the answer seems *mostly*
 grounded, though it's hard to say for certain") parses as `GROUNDED` every
-time — scoring only 4/8 on this dataset, missing every actual hallucination.
-GEPA's reflection step reads exactly that feedback string (`"Expected
-HALLUCINATED, got GROUNDED from raw output '...seems mostly grounded...'"`)
-across several failing examples, diagnoses the pattern — *the prompt doesn't
-forbid hedging* — and proposes a stricter instruction demanding a single
-word. A judge following that stricter prompt scores 7/8 on the same data.
-That evolved prompt, plus the full score trajectory and every candidate
-tried, is what ends up in `report.md`.
+time — missing every single real hallucination. That's not just a low
+score; the real confusion-matrix number for this seed is **recall = 0.0%**.
+GEPA's reflection step reads the specific feedback ("MISSED a real
+hallucination...") across several failing examples, diagnoses that *the
+prompt doesn't forbid hedging*, and proposes a stricter instruction
+demanding a single word. A judge following that stricter prompt catches
+every real hallucination in this dataset with one false alarm: **recall =
+100%, precision = 80%, F1 = 0.89**. Both the proxy score trajectory and
+these real numbers (seed vs. best, side by side) end up in `report.md`'s
+"Real recall / precision" section — so you see the actual metric you asked
+about, not just a proxy score that's hopefully correlated with it.
 
 ## Which part of the workflow gets optimized
 
@@ -324,6 +351,7 @@ not just the "how."
 | `WorkflowGEPAAdapter.evaluate()` | runs a candidate against a batch, returns scores + traces |
 | `WorkflowGEPAAdapter.make_reflective_dataset()` | turns traces into the feedback the reflection LM reads |
 | `reflection_lm` in `gepa.config.yaml` | the LM that reads failures and proposes a better prompt |
+| `reflection_minibatch_size` in `gepa.config.yaml` | how many rows each reflection step sees — auto-set to the whole training set for ≤25 rows (no noisy 3-row sampling), overridable |
 | `run_dir` + our own `result.json`/`report.md` dump | every candidate, score, and lineage, kept on disk |
 
 ## Development

@@ -26,7 +26,16 @@ def total_metric_calls(result: GEPAResult) -> int:
     return sum(result.discovery_eval_counts)
 
 
-def build_report(result: GEPAResult, run_dir: str | Path, config_summary: dict) -> str:
+def _fmt_pct(x: float | None) -> str:
+    return f"{x:.1%}" if x is not None else "n/a (no positive/negative examples in valset)"
+
+
+def build_report(
+    result: GEPAResult,
+    run_dir: str | Path,
+    config_summary: dict,
+    classification_stats: dict | None = None,
+) -> str:
     run_dir = Path(run_dir)
     seed_candidate = result.candidates[0]
     best_candidate = result.best_candidate
@@ -65,6 +74,29 @@ def build_report(result: GEPAResult, run_dir: str | Path, config_summary: dict) 
             lines.append("**Evolved:**")
             lines.append(f"```\n{text}\n```\n")
 
+    if classification_stats is not None:
+        seed_stats = classification_stats.get("seed")
+        best_stats = classification_stats.get("best")
+        lines.append("## Real recall / precision (not the per-example proxy score)\n")
+        lines.append(
+            "GEPA optimized against a per-example proxy score (asymmetric penalties for "
+            "false negatives vs. false positives) because recall/precision can't be computed "
+            "from a single example. These are the real, aggregate confusion-matrix numbers for "
+            "the seed vs. the winning prompt, on the validation set:\n"
+        )
+        lines.append("| | Seed | Best |")
+        lines.append("|---|---|---|")
+        for label, key in [("Recall", "recall"), ("Precision", "precision"), ("F1", "f1")]:
+            seed_val = seed_stats.get(key) if seed_stats else None
+            best_val = best_stats.get(key) if best_stats else None
+            lines.append(f"| {label} | {_fmt_pct(seed_val)} | {_fmt_pct(best_val)} |")
+        if best_stats:
+            lines.append(
+                f"\nConfusion matrix (best): TP={best_stats['tp']}, FP={best_stats['fp']}, "
+                f"TN={best_stats['tn']}, FN={best_stats['fn']} "
+                f"(positive class: `{best_stats['positive_label']}`)\n"
+            )
+
     frontier = result.per_val_instance_best_candidates
     lines.append("## Pareto frontier\n")
     lines.append(
@@ -84,12 +116,19 @@ def build_report(result: GEPAResult, run_dir: str | Path, config_summary: dict) 
         )
     if (run_dir / "iterations").exists():
         lines.append(f"- Per-iteration traces/components: `{run_dir / 'iterations'}/`")
+    if (run_dir / "classification_report.json").exists():
+        lines.append(f"- Full recall/precision/F1 breakdown (seed vs. best): `{run_dir / 'classification_report.json'}`")
 
     return "\n".join(lines)
 
 
-def write_report(result: GEPAResult, run_dir: str | Path, config_summary: dict) -> Path:
+def write_report(
+    result: GEPAResult,
+    run_dir: str | Path,
+    config_summary: dict,
+    classification_stats: dict | None = None,
+) -> Path:
     run_dir = Path(run_dir)
     report_path = run_dir / "report.md"
-    report_path.write_text(build_report(result, run_dir, config_summary))
+    report_path.write_text(build_report(result, run_dir, config_summary, classification_stats=classification_stats))
     return report_path

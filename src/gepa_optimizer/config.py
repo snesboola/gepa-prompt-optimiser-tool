@@ -28,6 +28,13 @@ class ProjectConfig:
     reflection_lm: str = "gemini/gemini-2.5-flash-lite"
     judge_lm: str | None = None
     max_metric_calls: int = 150
+    # None = auto: use the whole training set as the minibatch when it's
+    # small enough (see runner.py's SMALL_DATASET_THRESHOLD) instead of
+    # GEPA's own default (3) -- a 3-row sample makes an asymmetric-penalty
+    # metric noisy (often zero positive-labeled rows in the sample at all),
+    # while the full set every time is a stable, noise-free signal. Set an
+    # explicit int to override either way.
+    reflection_minibatch_size: int | None = None
     val_fraction: float = 0.3
     seed: int = 0
     run_dir: str = "runs/latest"

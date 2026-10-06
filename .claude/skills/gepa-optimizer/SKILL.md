@@ -131,11 +131,35 @@ seen.
    and what Phase 0 told you about what consumes this node's output — a
    downstream format requirement is a hard constraint even if the user
    never said it explicitly.
-2. Pick the closest starting template (`exact_match`, `keyword_presence`, or
-   `llm_judge`) and scaffold it:
+2. Pick the closest starting template and scaffold it:
    ```bash
    gepa-opt suggest-metric --type <type>
    ```
+   - `exact_match` / `keyword_presence`: a known-correct answer exists.
+   - `llm_judge`: open-ended output, no single correct answer, scored
+     against stated criteria via a separate judge call.
+   - `classification`: the goal is phrased in terms of recall/precision
+     (e.g. "catch most real hallucinations without too many false alarms"),
+     not raw accuracy. Say so explicitly to the user if you choose this one
+     instead of `exact_match`: GEPA scores one row at a time, so recall/
+     precision (aggregate, whole-dataset numbers) can't be the literal
+     per-example signal — this template scores each row with *asymmetric*
+     penalties (missing a positive costs more than a false alarm, by
+     default) as the closest thing GEPA can act on per example, and the
+     run separately reports the *real* recall/precision/F1 for the seed vs.
+     the winning prompt in `report.md`'s "Real recall / precision" section
+     (via `metrics.classification_report()`, wired in `runner.py`) — that's
+     where the user sees the actual number, not the proxy.
+   - `composite`: criteria mix a hard, checkable requirement (must mention
+     an exact phrase, must include specific terms) with a vaguer
+     qualitative one (must "capture industry detail", must "sound
+     professional") *in the same output*. Don't pick just one template for
+     this — the hard part needs an exact check, the soft part needs a
+     judge call, and they need to combine so the hard check can't be
+     traded away for a nicer-sounding response. `composite` does exactly
+     that: fails immediately (score 0, judge never even consulted) if a
+     required phrase is missing, and only once that gate passes does
+     `judge_lm` score the qualitative part.
 3. **Then rewrite the generated `metric.py` yourself** so the comparison
    logic actually matches the stated criteria and constraints — the
    scaffold is a starting shape, not a finished metric. Encode every hard
@@ -160,6 +184,13 @@ wants a thorough search. Mention the budget/cost tradeoff to the user before
 running anything large. Requires `ANTHROPIC_API_KEY` (or whatever provider
 `task_lm`/`reflection_lm` in `gepa.config.yaml` need) to be set — check for it
 and ask if missing, don't just fail silently into a wall of tracebacks.
+
+For a small dataset (≤25 training rows), `runner.py` already defaults the
+reflection minibatch to the *whole* training set rather than GEPA's own
+3-row sample — no action needed, but worth knowing if you're explaining why
+results look stable rather than noisy run to run. For a larger dataset,
+`gepa.config.yaml`'s `reflection_minibatch_size` field can be set explicitly
+if the default (GEPA's own sampling) isn't giving a stable enough signal.
 
 ## Phase 5 — Deliver results
 
