@@ -19,7 +19,13 @@ class ProjectConfig:
     # and go. Swap to any other litellm model string (or a "callable:..." spec,
     # see llm.py) once you're ready to use a different provider.
     task_lm: str = "gemini/gemini-2.5-flash-lite"  # most generous free-tier RPM/day quota; called once per row
-    reflection_lm: str = "gemini/gemini-2.5-flash"  # called far less often; slightly stronger model is worth it
+    # Also flash-lite, not a stronger model, by design: in testing, gemini-3.8-flash
+    # (the officially current, non-deprecated model) returned persistent 503
+    # "high demand" on every single reflection call on the free tier -- a real
+    # infra/availability issue, not a code bug, logged in AGENTS.md. flash-lite
+    # is the one actually proven to work end-to-end; swap this once 3.8-flash's
+    # free-tier availability settles down, or any time you're on a paid tier.
+    reflection_lm: str = "gemini/gemini-2.5-flash-lite"
     judge_lm: str | None = None
     max_metric_calls: int = 150
     val_fraction: float = 0.3

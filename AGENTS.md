@@ -36,6 +36,11 @@ architecture for all three:
   examples (content + known-correct verdict); metric compares the judge's
   verdict to that label with plain `exact_match`/`keyword_presence` — no
   recursion into another judge call needed.
+  `examples/hallucination_judge_demo` demonstrates this (optimizing a
+  hallucination-detection judge against labeled grounded/hallucinated rows);
+  verified logically with fake stand-in judges (a hedgy one scoring 4/8, a
+  strict one scoring 7/8) — not yet run against a real model (blocked on
+  today's Gemini free-tier quota, see below).
 - **Open-ended writing/creative tasks** — no single correct output exists;
   metric is `llm_judge`, scoring against stated criteria via a separate
   `judge_lm` call. Verified working end-to-end (fake task/judge LMs, no API
@@ -100,7 +105,79 @@ direct answer to a constraint that showed up along the way:
 | 2. Goal/criteria/target/constraints | Gathered conversationally by the skill (Phase 1), stored in `gepa.config.yaml`'s `goal`/`criteria` fields, expressed as `optimize: system\|user` on the target node(s) |
 | 3. Scoring function, proposed then approved | `gepa-opt suggest-metric` scaffolds (`metrics.py`); the skill rewrites it to actually match the stated criteria/constraints and stops for explicit approval before running anything (Phase 3 — a hard gate, never skipped) |
 | 4. GEPA runs recursively | `runner.py` → the real `gepa.optimize()`, via `WorkflowGEPAAdapter` (`adapter.py`) |
-| 5. Best prompt + cached runs + approaches + summary | `run_dir` (`runs/latest/`): `best_candidate.json`, `result.json` (every candidate + lineage + score), `iterations/` (full per-iteration traces, via `write_agent_state=True`), `candidate_tree.html`, and `report.md` (the human-readable summary, built by `report.py`) |
+| 5. Best prompt + cached runs + approaches + summary | `run_dir` (`runs/latest/`): `best_candidate.json`, `result.json` (every candidate + lineage + score), `candidate_tree.html`, and `report.md` (the human-readable summary, built by `report.py`). `write_agent_state` (a per-iteration `iterations/` trace tree) exists upstream only on `gepa`'s unreleased `main` branch, not the installed `0.1.4` -- see the "real bug log" note below |
+
+## Real bug log
+
+Caught by actually running things, not by inspection — kept here so the next
+session doesn't rediscover the same gap from scratch:
+
+- **`workflow.py` field-targeting bug** (fixed): a node with both `system`
+  and `user` text plus bare `optimize: true` silently overwrote *both*
+  fields with the same candidate text, destroying the original system
+  prompt. Fixed by requiring `optimize: system|user` when both fields are
+  present; `optimize: true` now raises instead of guessing. Covered by
+  `tests/test_workflow.py`.
+- **`write_agent_state` doesn't exist in the real PyPI package**: I'd read
+  `gepa`'s source off GitHub's `main` branch, which is ahead of what's
+  actually published (`0.1.4` is the latest on PyPI as of this writing).
+  `runner.py` passed `write_agent_state=True` to `gepa.optimize()`, which
+  raised `TypeError` the first time it was actually run against the real
+  installed library. Removed; `result.to_dict()` / `result.candidate_tree_html()`
+  (already used) cover the same "every candidate on disk" need without it.
+  **Lesson**: reading a dependency's GitHub source is not the same as
+  checking what version is actually installable — verify against
+  `inspect.signature()` on the real installed package, not just the repo.
+- **`result.best_score` / `result.total_evals` don't exist in `0.1.4`
+  either** (same ahead-of-release issue as above). Added `best_score()` /
+  `total_metric_calls()` helpers in `report.py` (derived from
+  `val_aggregate_scores[best_idx]` and `total_metric_calls`/
+  `discovery_eval_counts`), used from `runner.py`, `cli.py`, `report.py`
+  instead of the nonexistent properties.
+- **`WorkflowGEPAAdapter` had no `propose_new_texts` attribute**:
+  `GEPAAdapter` is a `Protocol`, not an ABC — its documented
+  `propose_new_texts: ProposalFn | None = None` default is not inherited by
+  an implementing class. `gepa`'s engine reads `self.adapter.propose_new_texts`
+  unconditionally, so every reflection attempt raised `AttributeError` until
+  `propose_new_texts = None` was added explicitly as a class attribute.
+- **Missing `litellm`/`tenacity`/`tqdm` dependencies**: `gepa` itself
+  declares *zero* dependencies (bring-your-own LM backend by design); our
+  own `workflow.py` imports `litellm` directly, and `display_progress_bar=True`
+  needs `tqdm`. `litellm`'s own retry logic lazily imports `tenacity`,
+  which isn't pulled in by installing `litellm` alone. All three added to
+  `pyproject.toml`.
+- **`gemini-2.5-flash` deprecated mid-session; `gemini-3.8-flash`
+  (its suggested replacement, officially current and free-tier-eligible)
+  returned persistent `503 "high demand"` on every single reflection call
+  in testing**: not a code bug, a real free-tier availability issue with a
+  model released days before this was written. `reflection_lm` defaults to
+  `gemini-2.5-flash-lite` instead -- the model actually proven to complete
+  real calls end-to-end in this project. Revisit once 3.8-flash's free-tier
+  availability settles, or on a paid tier.
+- **The real free-tier daily quota is much tighter than public docs
+  suggested**: search results earlier in this project said
+  `gemini-2.5-flash-lite` gets ~1,000 requests/day free. The actual error
+  hit in testing says the real limit is **20 requests/day per project per
+  model** (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`, quota
+  exhausted, ~9h retry delay given). Google tightened free-tier limits
+  significantly at some point after that older documentation was written.
+  **Practical consequence**: `max_metric_calls: 20` in `qa_demo`'s config
+  is already close to or over one model's entire daily budget once seed
+  eval + reflection calls are counted -- a real run needs either a lower
+  budget, a paid tier, or patience for the daily reset. Quota is tracked
+  per model name, so task_lm and reflection_lm sharing one model name share
+  one budget; using two different model names doubles the effective daily
+  budget.
+- **Stale `run_dir` state masks fixes**: `gepa.optimize()` resumes from
+  `gepa_state.bin` if `run_dir` already has one, including bad runs from
+  before a bug fix -- it'll silently replay the old (broken) results instead
+  of re-evaluating. `rm -rf <run_dir>` before any re-run meant to test a fix.
+- **There already was a real log, just undocumented**: `gepa.optimize()`
+  writes `run_log.txt`/`run_log_stderr.txt` into `run_dir` automatically
+  (its default `Logger`, since we pass `run_dir` without overriding
+  `logger`) -- every iteration, every reflection attempt, retries/errors
+  verbatim. This is the thing to tail if a run looks stuck. Now listed in
+  `report.md`'s "Cached run data" section and in `README.md`.
 
 ## Other docs
 

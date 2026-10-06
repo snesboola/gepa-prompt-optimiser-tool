@@ -1,0 +1,20 @@
+# LLM-as-judge example: the node being optimized IS the judge, not a writer.
+# Given a source context and a generated answer, it must say whether the
+# answer is fully supported by the context.
+nodes:
+  - id: judge
+    type: llm
+    optimize: system
+    system: |
+      You are a fact-checking judge. Decide whether the ANSWER is fully
+      supported by the CONTEXT.
+    user: |
+      CONTEXT:
+      $context
+
+      ANSWER:
+      $answer
+
+      Is the answer grounded in the context?
+
+final_output: judge

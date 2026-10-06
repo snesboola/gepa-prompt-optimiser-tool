@@ -10,7 +10,7 @@ from .config import ProjectConfig
 from .dataset import load_dataset, split_dataset
 from .llm import resolve_lm
 from .metrics import load_metric
-from .report import write_report
+from .report import best_score, write_report
 from .workflow import WorkflowSpec
 
 
@@ -40,8 +40,8 @@ def run_optimization(config: ProjectConfig, project_root: str | Path = ".") -> "
         reflection_lm=reflection_lm,
         max_metric_calls=config.max_metric_calls,
         seed=config.seed,
-        run_dir=str(run_dir),
-        write_agent_state=True,  # keeps every candidate/trace/score on disk -- the "cached runs" the user asked for
+        run_dir=str(run_dir),  # gepa==0.1.4 writes gepa_state.bin here (candidate pool, for resuming);
+        # we separately dump our own JSON/HTML views of it below -- that's the human-readable "cached runs" artifact
         track_best_outputs=True,
         display_progress_bar=True,
     )
@@ -50,7 +50,7 @@ def run_optimization(config: ProjectConfig, project_root: str | Path = ".") -> "
 
     (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
     (run_dir / "best_candidate.json").write_text(
-        json.dumps({"best_candidate": result.best_candidate, "best_score": result.best_score}, indent=2)
+        json.dumps({"best_candidate": result.best_candidate, "best_score": best_score(result)}, indent=2)
     )
     (run_dir / "candidate_tree.html").write_text(result.candidate_tree_html())
     write_report(result, run_dir, config_summary={"goal": config.goal, "criteria": config.criteria})

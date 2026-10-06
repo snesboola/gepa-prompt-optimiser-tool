@@ -1,0 +1,8 @@
+{"context": "The Eiffel Tower was completed in 1889 and stands 330 metres tall.", "answer": "The Eiffel Tower was finished in 1889.", "label": "GROUNDED"}
+{"context": "The Eiffel Tower was completed in 1889 and stands 330 metres tall.", "answer": "The Eiffel Tower is 450 metres tall.", "label": "HALLUCINATED"}
+{"context": "Mount Everest's summit sits at 8,849 metres above sea level.", "answer": "Mount Everest's peak is about 8,849 metres high.", "label": "GROUNDED"}
+{"context": "Mount Everest's summit sits at 8,849 metres above sea level.", "answer": "Mount Everest is the tallest mountain and was first climbed in 1920.", "label": "HALLUCINATED"}
+{"context": "The company's Q3 revenue was $4.2 million, up 12% year over year.", "answer": "Q3 revenue grew 12% to $4.2 million.", "label": "GROUNDED"}
+{"context": "The company's Q3 revenue was $4.2 million, up 12% year over year.", "answer": "Q3 revenue grew 25% as the company expanded into new markets.", "label": "HALLUCINATED"}
+{"context": "The patient was prescribed 10mg of the medication twice daily for two weeks.", "answer": "The dosage was 10mg, taken twice a day for 14 days.", "label": "GROUNDED"}
+{"context": "The patient was prescribed 10mg of the medication twice daily for two weeks.", "answer": "The patient was told to take 20mg once daily indefinitely.", "label": "HALLUCINATED"}

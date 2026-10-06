@@ -29,6 +29,12 @@ class Trajectory:
 class WorkflowGEPAAdapter:
     """Candidate: dict mapping optimizable node id -> prompt text."""
 
+    # GEPAAdapter is a Protocol, not an ABC -- the engine still does
+    # `self.adapter.propose_new_texts` unconditionally (gepa's reflective_mutation.py),
+    # so a concrete adapter that doesn't define its own proposer must declare
+    # this explicitly or every reflection call raises AttributeError.
+    propose_new_texts = None
+
     def __init__(
         self,
         spec: WorkflowSpec,

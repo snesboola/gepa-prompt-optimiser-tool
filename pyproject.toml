@@ -12,6 +12,12 @@ license = { text = "MIT" }
 dependencies = [
     "gepa>=0.1.4",
     "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "tqdm>=4.0",
+    # gepa declares no deps of its own -- a litellm model string (ours or
+    # reflection_lm's) needs this installed regardless.
+    "litellm>=1.0",
+    "tenacity>=8.0",  # litellm's own retry logic imports this lazily; not pulled in automatically
 ]
 
 [project.optional-dependencies]

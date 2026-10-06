@@ -1,7 +1,7 @@
 """Builds the human-readable summary deliverable: best prompt(s), how the
 score moved across every candidate tried, and where to find the full cached
-run (every candidate/score/trace lives under run_dir because
-run_optimization() passes write_agent_state=True to gepa.optimize()).
+run (result.json + best_candidate.json + candidate_tree.html, written by
+runner.run_optimization() right after gepa.optimize() returns).
 """
 
 from __future__ import annotations
@@ -10,6 +10,20 @@ import json
 from pathlib import Path
 
 from gepa import GEPAResult
+
+
+def best_score(result: GEPAResult) -> float:
+    """gepa==0.1.4's GEPAResult has no .best_score property (that's an
+    unreleased main-branch addition) -- derive it the same way its own
+    docstring example does."""
+    return result.val_aggregate_scores[result.best_idx]
+
+
+def total_metric_calls(result: GEPAResult) -> int:
+    """Likewise, .total_evals doesn't exist yet in 0.1.4."""
+    if result.total_metric_calls is not None:
+        return result.total_metric_calls
+    return sum(result.discovery_eval_counts)
 
 
 def build_report(result: GEPAResult, run_dir: str | Path, config_summary: dict) -> str:
@@ -27,8 +41,8 @@ def build_report(result: GEPAResult, run_dir: str | Path, config_summary: dict) 
         lines.append(f"**Criteria:** {config_summary['criteria']}\n")
 
     lines.append(f"**Candidates explored:** {result.num_candidates}")
-    lines.append(f"**Metric calls used:** {result.total_evals}")
-    lines.append(f"**Best candidate index:** {best_idx} (score: {result.best_score:.4f})\n")
+    lines.append(f"**Metric calls used:** {total_metric_calls(result)}")
+    lines.append(f"**Best candidate index:** {best_idx} (score: {best_score(result):.4f})\n")
 
     lines.append("## Score trajectory\n")
     lines.append("| Candidate | Parent(s) | Val Score |")
@@ -63,6 +77,11 @@ def build_report(result: GEPAResult, run_dir: str | Path, config_summary: dict) 
     lines.append(f"- Full candidate pool + scores: `{run_dir / 'result.json'}`")
     lines.append(f"- Best candidate only: `{run_dir / 'best_candidate.json'}`")
     lines.append(f"- Interactive lineage tree: `{run_dir / 'candidate_tree.html'}`")
+    if (run_dir / "run_log.txt").exists():
+        lines.append(
+            f"- Full run log (every iteration, every reflection attempt, retries/errors verbatim): "
+            f"`{run_dir / 'run_log.txt'}`"
+        )
     if (run_dir / "iterations").exists():
         lines.append(f"- Per-iteration traces/components: `{run_dir / 'iterations'}/`")
 

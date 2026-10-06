@@ -2,7 +2,7 @@ workflow: workflow.yaml
 dataset: dataset.jsonl
 metric: metric.py
 task_lm: gemini/gemini-2.5-flash-lite
-reflection_lm: gemini/gemini-2.5-flash
+reflection_lm: gemini/gemini-2.5-flash-lite
 judge_lm: null
 max_metric_calls: 20
 val_fraction: 0.34

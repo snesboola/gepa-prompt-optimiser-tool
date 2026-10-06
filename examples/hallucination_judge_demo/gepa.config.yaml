@@ -1,0 +1,12 @@
+workflow: workflow.yaml
+dataset: dataset.jsonl
+metric: metric.py
+task_lm: gemini/gemini-2.5-flash-lite
+reflection_lm: gemini/gemini-2.5-flash-lite
+judge_lm: null
+max_metric_calls: 20
+val_fraction: 0.375
+seed: 0
+run_dir: runs/latest
+goal: Accurately flag whether a generated answer is fully supported by its source context (hallucination detection).
+criteria: Output must be a single unambiguous verdict (grounded vs. hallucinated) with no hedging, caveats, or extra explanation.

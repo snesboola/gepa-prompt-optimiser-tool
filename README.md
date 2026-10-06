@@ -95,7 +95,117 @@ gepa-opt report
 - `candidate_tree.html` — an interactive view of how candidates evolved
 - `report.md` — the human-readable summary (best prompt vs. seed, score
   trajectory, Pareto frontier size)
-- `iterations/` — full per-iteration traces (since `write_agent_state=True`)
+- `run_log.txt` / `run_log_stderr.txt` — `gepa`'s own live log: every
+  iteration, every reflection attempt, retries and errors verbatim (written
+  automatically because `run_dir` is set; this is the thing to tail if a run
+  looks stuck or you want to see exactly what happened)
+- `gepa_state.bin` — `gepa`'s own pickled run state (lets a future version
+  resume); not human-readable, `result.json` is the readable equivalent
+
+## Worked example: optimizing a hallucination-detection judge
+
+A full walkthrough, start to finish, using a different shape of problem than
+the QA example above: here the prompt being optimized is itself a **judge**
+— given a source context and a generated answer, it has to say whether the
+answer is actually supported by the context, or hallucinated. This is the
+LLM-as-judge case from [AGENTS.md](AGENTS.md)'s "what kinds of prompts this
+optimizes" — scored against *known-correct labels*, not another judge call.
+The finished files live in [`examples/hallucination_judge_demo`](examples/hallucination_judge_demo).
+
+**1. State the goal and scaffold the project:**
+
+```bash
+mkdir hallucination-judge && cd hallucination-judge
+gepa-opt init \
+  --goal "Accurately flag whether a generated answer is fully supported by its source context" \
+  --criteria "Output must be a single unambiguous verdict, no hedging or extra explanation"
+```
+
+**2. Point `workflow.yaml` at the real judge prompt, replace `dataset.jsonl`
+with labeled examples** (context + answer + the true verdict):
+
+```yaml
+nodes:
+  - id: judge
+    type: llm
+    optimize: system
+    system: |
+      You are a fact-checking judge. Decide whether the ANSWER is fully
+      supported by the CONTEXT.
+    user: |
+      CONTEXT:
+      $context
+
+      ANSWER:
+      $answer
+
+      Is the answer grounded in the context?
+
+final_output: judge
+```
+
+```jsonl
+{"context": "The Eiffel Tower was completed in 1889 and stands 330 metres tall.", "answer": "The Eiffel Tower was finished in 1889.", "label": "GROUNDED"}
+{"context": "The Eiffel Tower was completed in 1889 and stands 330 metres tall.", "answer": "The Eiffel Tower is 450 metres tall.", "label": "HALLUCINATED"}
+```
+
+**3. Draft and approve the scoring function:**
+
+```bash
+gepa-opt suggest-metric --type keyword_presence
+```
+
+The scaffold is generic; the real metric needs hand-editing to actually
+compare the judge's verdict to `row["label"]` and tolerate phrasing
+("not grounded" == `HALLUCINATED`) while still scoring 0 for a hedging,
+ambiguous answer — hedging is exactly the failure mode you want GEPA to
+evolve away from:
+
+```python
+def score(row: dict, trace: dict) -> tuple[float, str]:
+    expected = row["label"].strip().upper()
+    output = str(trace["final_output"]).upper()
+
+    mentions_not_grounded = "HALLUCINAT" in output or "NOT GROUNDED" in output
+    mentions_grounded = "GROUNDED" in output and not mentions_not_grounded
+    predicted = (
+        "HALLUCINATED" if mentions_not_grounded
+        else "GROUNDED" if mentions_grounded
+        else "UNCLEAR"
+    )
+
+    if predicted == expected:
+        return 1.0, f"Correctly judged as {expected}."
+    return 0.0, (
+        f"Expected {expected}, got {predicted} from raw output {trace['final_output']!r}. "
+        "If verbose/hedging, demand a single unambiguous word as the entire response."
+    )
+```
+
+This is the approval gate: read the logic above, confirm it actually matches
+what "correct" means for your judge, before running anything.
+
+**4. Run it:**
+
+```bash
+gepa-opt optimize --max-metric-calls 20
+gepa-opt report
+```
+
+**What actually happens**, verified against the logic above with stand-in
+judges (no API calls — see `AGENTS.md`'s bug log for why a live run is
+pending a Gemini free-tier quota reset as of this writing): the seed prompt
+("Decide whether the ANSWER is fully supported by the CONTEXT") leaves the
+output format open, so a judge that hedges ("the answer seems *mostly*
+grounded, though it's hard to say for certain") parses as `GROUNDED` every
+time — scoring only 4/8 on this dataset, missing every actual hallucination.
+GEPA's reflection step reads exactly that feedback string (`"Expected
+HALLUCINATED, got GROUNDED from raw output '...seems mostly grounded...'"`)
+across several failing examples, diagnoses the pattern — *the prompt doesn't
+forbid hedging* — and proposes a stricter instruction demanding a single
+word. A judge following that stricter prompt scores 7/8 on the same data.
+That evolved prompt, plus the full score trajectory and every candidate
+tried, is what ends up in `report.md`.
 
 ## Which part of the workflow gets optimized
 
@@ -147,6 +257,65 @@ than a direct provider API key (e.g. an internal gateway that only exposes a
 system-prompt/user-prompt call). Both are single, isolated seams — nothing
 else in this package needs to change.
 
+## Using this with any coding agent or harness
+
+Nothing here is tied to Claude Code specifically. The engine is a plain CLI
+(`gepa-opt`) and an importable Python package; the guided journey is a
+Markdown instructions file. Any environment that can run Python and read a
+Markdown playbook can drive the whole thing — a different coding agent, a
+custom internal harness, or just you in a terminal.
+
+1. **Get the code there.** Clone this repo wherever you're working. If that
+   environment can't reach GitHub, `reference/gepa-ai-gepa` (a submodule
+   pointing at a public fork, kept purely for citation) can be dropped —
+   nothing in the package imports from it.
+
+2. **Install it** (`>=3.10`, per `gepa`'s own requirement):
+   ```bash
+   pip install -e .
+   ```
+   No specific coding agent and no GUI required.
+
+3. **Have your harness follow the skill.** `.claude/skills/gepa-optimizer/SKILL.md`
+   is a plain Markdown playbook for the five-phase journey (clarify
+   goal/target/constraints → draft+approve a metric → run → deliver
+   results). Claude Code auto-discovers it from that path; any other agent
+   that can be pointed at a Markdown file and told "follow these
+   instructions" can use the exact same file — the phases, the approval
+   gate, and the CLI commands it calls don't reference Claude Code
+   anywhere. `AGENTS.md` is the harness-agnostic summary of the same intent,
+   for a harness (or a person) that just wants the "why" without the
+   step-by-step playbook.
+
+4. **Point the LM at whatever you actually have access to.** A litellm
+   model string works if you have a normal provider key. If the only
+   sanctioned path to a model is through something else entirely — an
+   internal gateway, a workflow platform that takes a system prompt + user
+   prompt and returns text — write one function matching
+   `Callable[[str | list[dict]], str]` (see [`docs/adapters.md`](docs/adapters.md)
+   for a worked example) and point config at it:
+   ```yaml
+   task_lm: "callable:my_client:my_llm_call"
+   reflection_lm: "callable:my_client:my_llm_call"
+   ```
+   Credentials go in `.env` (gitignored, loaded automatically — see
+   `.env.example`); nothing in this package needs them hardcoded.
+
+5. **If you want it to execute your real platform, not just a bare LLM
+   call**, subclass `WorkflowRunner` and override `run()`/`call_llm()` to
+   actually invoke that platform per candidate (`docs/adapters.md` has the
+   pattern). Skip this if optimizing the prompt text in isolation is good
+   enough — most of the time it is.
+
+6. **Everything else is identical** regardless of where you're running
+   this: `gepa-opt init` / `suggest-metric` / `optimize` / `report`, the
+   same `gepa.config.yaml` shape, the same `run_dir` artifacts.
+
+See [`AGENTS.md`](AGENTS.md) for the full reasoning behind this split
+(why a real upstream library instead of a toy reimplementation, why the
+LM and workflow backends are both pluggable seams) if you want the "why,"
+not just the "how."
+
 ## How the pieces map to GEPA
 
 | This repo | GEPA concept |
@@ -155,7 +324,7 @@ else in this package needs to change.
 | `WorkflowGEPAAdapter.evaluate()` | runs a candidate against a batch, returns scores + traces |
 | `WorkflowGEPAAdapter.make_reflective_dataset()` | turns traces into the feedback the reflection LM reads |
 | `reflection_lm` in `gepa.config.yaml` | the LM that reads failures and proposes a better prompt |
-| `run_dir` / `write_agent_state=True` | every candidate, score, and trace, kept on disk |
+| `run_dir` + our own `result.json`/`report.md` dump | every candidate, score, and lineage, kept on disk |
 
 ## Development
 

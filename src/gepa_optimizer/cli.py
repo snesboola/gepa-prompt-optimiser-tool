@@ -4,6 +4,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from .config import DEFAULT_CONFIG_NAME, ProjectConfig
 from .metrics import TEMPLATES, scaffold_metric
 
@@ -94,7 +96,9 @@ def cmd_optimize(args: argparse.Namespace) -> None:
 
     print(f"Running GEPA optimization (budget: {config.max_metric_calls} metric calls)...")
     result = run_optimization(config, project_root=project_root)
-    print(f"\nDone. Best score: {result.best_score:.4f} (candidate {result.best_idx} of {result.num_candidates})")
+    from .report import best_score
+
+    print(f"\nDone. Best score: {best_score(result):.4f} (candidate {result.best_idx} of {result.num_candidates})")
     print(f"Report: {project_root / config.run_dir / 'report.md'}")
 
 
@@ -134,6 +138,7 @@ def main(argv: list[str] | None = None) -> None:
     p_report.set_defaults(func=cmd_report)
 
     args = parser.parse_args(argv)
+    load_dotenv(Path(args.path) / ".env")  # e.g. GEMINI_API_KEY -- see .env.example
     args.func(args)
 
 
