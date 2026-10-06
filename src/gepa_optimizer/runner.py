@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -59,25 +60,14 @@ def _held_out_test_stats(
     return {"mean_score": sum(eval_batch.scores) / len(eval_batch.scores), "n": len(eval_batch.scores)}
 
 
-def run_optimization(config: ProjectConfig, project_root: str | Path = ".") -> "gepa.GEPAResult":
-    project_root = Path(project_root)
-
+def _build_adapter(config: ProjectConfig, project_root: Path, metric_module) -> tuple[WorkflowGEPAAdapter, str]:
     spec = WorkflowSpec.from_yaml(project_root / config.workflow)
-    rows = load_dataset(project_root / config.dataset)
-    trainset, valset, testset = split_dataset(
-        rows, val_fraction=config.val_fraction, test_fraction=config.test_fraction, seed=config.seed
-    )
-
-    metric_module = load_metric_module(project_root / config.metric)
-    score_fn = metric_module.score
-    classification_capability = _classification_capability(metric_module)
-
     task_lm = resolve_lm(config.task_lm, project_root=project_root)
-    reflection_lm = resolve_lm(config.reflection_lm, project_root=project_root)
     judge_lm = resolve_lm(config.judge_lm, project_root=project_root) if config.judge_lm else None
 
     adapter_kwargs: dict[str, Any] = {"max_workers": config.max_workers}
     frontier_type = "instance"
+    classification_capability = _classification_capability(metric_module)
     if classification_capability is not None:
         classify_fn, positive_label, label_field = classification_capability
         adapter_kwargs.update(classify_fn=classify_fn, positive_label=positive_label, label_field=label_field)
@@ -89,7 +79,98 @@ def run_optimization(config: ProjectConfig, project_root: str | Path = ".") -> "
         # (see AGENTS.md) -- not just assumed to work.
         frontier_type = "hybrid"
 
-    adapter = WorkflowGEPAAdapter(spec=spec, task_lm=task_lm, score_fn=score_fn, judge_lm=judge_lm, **adapter_kwargs)
+    adapter = WorkflowGEPAAdapter(
+        spec=spec, task_lm=task_lm, score_fn=metric_module.score, judge_lm=judge_lm, **adapter_kwargs
+    )
+    return adapter, frontier_type
+
+
+def validate_metric(config: ProjectConfig, project_root: str | Path = ".", n_rows: int = 2) -> dict[str, Any]:
+    """Run the metric against a couple of real dataset rows *before*
+    committing to a full optimize() run. Several of this project's own real
+    bugs (wrong field names, missing deps, a broken task_lm) only surfaced
+    mid-run, after burning real API budget/quota -- this catches the same
+    class of problem for ~n_rows worth of calls instead.
+
+    Raises (propagated from adapter.evaluate()'s own loud-failure check) if
+    every sampled row fails with a real exception. Returns a summary dict
+    either way when it doesn't raise; `n_failed > 0` means at least one
+    sampled row failed even though not all of them did -- worth surfacing,
+    not necessarily fatal (could be one flaky network call).
+    """
+    project_root = Path(project_root)
+    rows = load_dataset(project_root / config.dataset)
+    if not rows:
+        raise ValueError(f"{project_root / config.dataset} is empty -- nothing to validate against.")
+
+    metric_module = load_metric_module(project_root / config.metric)
+    spec = WorkflowSpec.from_yaml(project_root / config.workflow)
+    adapter, _ = _build_adapter(config, project_root, metric_module)
+
+    sample = rows[:n_rows]
+    eval_batch = adapter.evaluate(sample, spec.seed_candidate(), capture_traces=True)
+
+    failures = [
+        (row, out.get("error")) for row, out in zip(sample, eval_batch.outputs) if isinstance(out, dict) and out.get("error")
+    ]
+    return {"n_checked": len(sample), "n_failed": len(failures), "scores": eval_batch.scores, "failures": failures}
+
+
+def _resolve_run_dir(config: ProjectConfig, project_root: Path, resume: bool | None) -> Path:
+    run_dir = project_root / config.run_dir
+    state_file = run_dir / "gepa_state.bin"
+
+    if not state_file.exists():
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return run_dir
+
+    if resume is None:
+        raise RuntimeError(
+            f"{state_file} already exists from a previous run. gepa.optimize() resumes from it "
+            f"automatically if left alone -- which silently served stale results from before a bug "
+            f"fix earlier in this project's own history (see AGENTS.md). Pass resume=True to actually "
+            f"continue that run, or resume=False to archive it and start fresh "
+            f"(gepa-opt optimize --resume or --fresh)."
+        )
+    if resume is False:
+        archive_dir = run_dir.parent / f"{run_dir.name}_archived_{int(time.time())}"
+        run_dir.rename(archive_dir)
+        print(f"Archived previous run to {archive_dir}")
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+    return run_dir
+
+
+def run_optimization(
+    config: ProjectConfig,
+    project_root: str | Path = ".",
+    resume: bool | None = None,
+    skip_validate: bool = False,
+) -> "gepa.GEPAResult":
+    project_root = Path(project_root)
+
+    metric_module = load_metric_module(project_root / config.metric)
+
+    if not skip_validate:
+        validation = validate_metric(config, project_root=project_root)
+        if validation["n_failed"] > 0:
+            print(
+                f"WARNING: {validation['n_failed']}/{validation['n_checked']} pre-flight validation "
+                f"row(s) failed: {validation['failures']}. Proceeding anyway -- pass skip_validate=True "
+                f"(or --skip-validate) to silence this once you've confirmed it's expected."
+            )
+
+    run_dir = _resolve_run_dir(config, project_root, resume)
+
+    spec = WorkflowSpec.from_yaml(project_root / config.workflow)
+    rows = load_dataset(project_root / config.dataset)
+    trainset, valset, testset = split_dataset(
+        rows, val_fraction=config.val_fraction, test_fraction=config.test_fraction, seed=config.seed
+    )
+
+    classification_capability = _classification_capability(metric_module)
+    reflection_lm = resolve_lm(config.reflection_lm, project_root=project_root)
+    adapter, frontier_type = _build_adapter(config, project_root, metric_module)
 
     if config.reflection_minibatch_size is not None:
         minibatch_size = config.reflection_minibatch_size
@@ -97,9 +178,6 @@ def run_optimization(config: ProjectConfig, project_root: str | Path = ".") -> "
         minibatch_size = len(trainset)  # every reflection step sees the whole training set, not a noisy sample
     else:
         minibatch_size = None  # GEPA's own default (3)
-
-    run_dir = project_root / config.run_dir
-    run_dir.mkdir(parents=True, exist_ok=True)
 
     result = gepa.optimize(
         seed_candidate=spec.seed_candidate(),
@@ -109,6 +187,8 @@ def run_optimization(config: ProjectConfig, project_root: str | Path = ".") -> "
         reflection_lm=reflection_lm,
         reflection_minibatch_size=minibatch_size,
         frontier_type=frontier_type,
+        use_merge=config.use_merge,
+        max_merge_invocations=config.max_merge_invocations,
         max_metric_calls=config.max_metric_calls,
         seed=config.seed,
         run_dir=str(run_dir),  # gepa==0.1.4 writes gepa_state.bin here (candidate pool, for resuming);

@@ -129,6 +129,21 @@ def cmd_suggest_metric(args: argparse.Namespace) -> None:
     print(f"(available templates: {list(TEMPLATES)})")
 
 
+def cmd_validate(args: argparse.Namespace) -> None:
+    from .runner import validate_metric  # deferred: gepa import is heavy and optional until needed
+
+    project_root = Path(args.path)
+    config = ProjectConfig.load(project_root / DEFAULT_CONFIG_NAME)
+
+    print(f"Validating metric against {args.n_rows} real dataset row(s) (before spending a real budget)...")
+    result = validate_metric(config, project_root=project_root, n_rows=args.n_rows)
+    print(f"Checked {result['n_checked']}, failed {result['n_failed']}. Scores: {result['scores']}")
+    if result["n_failed"] > 0:
+        print(f"Failures: {result['failures']}", file=sys.stderr)
+        sys.exit(1)
+    print("OK -- looks safe to run `gepa-opt optimize`.")
+
+
 def cmd_optimize(args: argparse.Namespace) -> None:
     from .runner import run_optimization  # deferred: gepa import is heavy and optional until needed
 
@@ -138,8 +153,18 @@ def cmd_optimize(args: argparse.Namespace) -> None:
     if args.max_metric_calls is not None:
         config.max_metric_calls = args.max_metric_calls
 
+    resume = True if args.resume else (False if args.fresh else None)
+    state_file = project_root / config.run_dir / "gepa_state.bin"
+    if resume is None and state_file.exists():
+        print(
+            f"{state_file} exists from a previous run. Re-run with --resume to continue it, "
+            f"or --fresh to archive it and start over.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     print(f"Running GEPA optimization (budget: {config.max_metric_calls} metric calls)...")
-    result = run_optimization(config, project_root=project_root)
+    result = run_optimization(config, project_root=project_root, resume=resume, skip_validate=args.skip_validate)
     from .report import best_score
 
     print(f"\nDone. Best score: {best_score(result):.4f} (candidate {result.best_idx} of {result.num_candidates})")
@@ -177,8 +202,15 @@ def main(argv: list[str] | None = None) -> None:
     p_metric.add_argument("--force", action="store_true")
     p_metric.set_defaults(func=cmd_suggest_metric)
 
+    p_validate = sub.add_parser("validate", help="Dry-run the metric against a couple of real rows before spending budget")
+    p_validate.add_argument("--n-rows", type=int, default=2)
+    p_validate.set_defaults(func=cmd_validate)
+
     p_opt = sub.add_parser("optimize", help="Run the GEPA loop")
     p_opt.add_argument("--max-metric-calls", type=int, default=None)
+    p_opt.add_argument("--resume", action="store_true", help="Continue a previous run found in run_dir")
+    p_opt.add_argument("--fresh", action="store_true", help="Archive a previous run in run_dir and start over")
+    p_opt.add_argument("--skip-validate", action="store_true", help="Skip the automatic pre-flight metric check")
     p_opt.set_defaults(func=cmd_optimize)
 
     p_report = sub.add_parser("report", help="Print the summary report from the last run")

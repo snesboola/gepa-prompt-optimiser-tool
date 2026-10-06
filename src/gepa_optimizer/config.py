@@ -48,6 +48,13 @@ class ProjectConfig:
     # requests at once is exactly what triggered the free-tier 429s logged in
     # AGENTS.md. Safe to raise on a paid tier or a higher-limit provider.
     max_workers: int = 1
+    # Crossover between two Pareto-frontier candidates (GEPA's "merge"
+    # strategy), on top of reflective mutation -- lets a candidate that's
+    # best on some examples and one that's best on others get combined
+    # instead of only ever evolving one lineage at a time. Enabled by
+    # default; set False to go back to reflection-only.
+    use_merge: bool = True
+    max_merge_invocations: int = 5
     run_dir: str = "runs/latest"
     goal: str = ""
     criteria: str = ""

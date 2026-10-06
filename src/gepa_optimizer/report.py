@@ -6,10 +6,32 @@ runner.run_optimization() right after gepa.optimize() returns).
 
 from __future__ import annotations
 
+import difflib
 import json
 from pathlib import Path
 
 from gepa import GEPAResult
+
+
+def word_diff_markdown(old: str, new: str) -> str:
+    """Word-level diff rendered as markdown (~~removed~~, **added**, plain
+    unchanged) -- so "what changed" between two prompts is readable at a
+    glance instead of eyeballing two full text blocks."""
+    old_words, new_words = old.split(), new.split()
+    matcher = difflib.SequenceMatcher(a=old_words, b=new_words, autojunk=False)
+    parts: list[str] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            parts.append(" ".join(old_words[i1:i2]))
+        elif tag in ("delete", "replace"):
+            if old_words[i1:i2]:
+                parts.append(f"~~{' '.join(old_words[i1:i2])}~~")
+            if tag == "replace" and new_words[j1:j2]:
+                parts.append(f"**{' '.join(new_words[j1:j2])}**")
+        elif tag == "insert":
+            if new_words[j1:j2]:
+                parts.append(f"**{' '.join(new_words[j1:j2])}**")
+    return " ".join(p for p in parts if p)
 
 
 def best_score(result: GEPAResult) -> float:
@@ -70,10 +92,39 @@ def build_report(
         if text == seed_text:
             lines.append("_Unchanged from seed._\n")
         else:
+            lines.append(f"**What changed:** {word_diff_markdown(seed_text, text)}\n")
+            lines.append("<details><summary>Full text (seed vs. evolved)</summary>\n")
             lines.append("**Seed:**")
             lines.append(f"```\n{seed_text}\n```")
             lines.append("**Evolved:**")
-            lines.append(f"```\n{text}\n```\n")
+            lines.append(f"```\n{text}\n```")
+            lines.append("</details>\n")
+
+    lines.append("## All candidates tried\n")
+    lines.append(
+        "Every prompt GEPA actually tried, not just the seed and the winner -- "
+        "this is the full \"different approaches\" record.\n"
+    )
+    for idx, candidate in enumerate(result.candidates):
+        parents = [p for p in (result.parents[idx] if idx < len(result.parents) else []) if p is not None]
+        score = result.val_aggregate_scores[idx] if idx < len(result.val_aggregate_scores) else None
+        role = " **(best)**" if idx == best_idx else (" (seed)" if idx == 0 else "")
+        score_str = f"{score:.4f}" if score is not None else "n/a"
+        lines.append(f"<details><summary>Candidate {idx}{role} -- score {score_str}, parent(s) {parents or 'none'}</summary>\n")
+        if len(parents) == 1:
+            parent_candidate = result.candidates[parents[0]]
+            for component, text in candidate.items():
+                parent_text = parent_candidate.get(component, "")
+                if text == parent_text:
+                    continue
+                lines.append(f"`{component}`: {word_diff_markdown(parent_text, text)}\n")
+        else:
+            # seed (no parent) or a merge result (two parents) -- a diff
+            # against one parent alone would be misleading, show full text
+            for component, text in candidate.items():
+                lines.append(f"**`{component}`:**")
+                lines.append(f"```\n{text}\n```")
+        lines.append("</details>\n")
 
     if classification_stats is not None:
         seed_stats = classification_stats.get("seed")

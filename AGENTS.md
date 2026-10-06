@@ -206,6 +206,62 @@ architecture for all three:
   trajectories is preserved regardless of worker count (`tests/
   test_workflow.py::test_adapter_parallel_execution_preserves_order_and_correctness`).
 
+- **Pre-flight metric validation.** `gepa-opt validate` (also run
+  automatically inside `run_optimization()` unless `skip_validate=True`)
+  runs the approved metric against a couple of real dataset rows before
+  committing to a full search. Reuses `adapter.evaluate()`'s own
+  loud-failure check rather than duplicating it -- several of this
+  project's real bugs this session (wrong field names, missing deps, a
+  broken `task_lm`) only surfaced mid-run, after spending real quota;
+  this catches the same class of problem for ~2 calls instead.
+
+- **CSV + list-typed fields was a real latent bug, not just a theoretical
+  one.** `keyword_presence`/`composite` expect `required_keywords`/
+  `required_phrases` to be a Python list. `csv.DictReader` returns every
+  cell as a plain string, so a CSV dataset would have silently iterated
+  that string character-by-character instead of over keywords -- wrong,
+  with no error. `load_dataset()` now decodes a CSV cell as JSON when it
+  looks like a list/object (`[`/`{` prefix), falling back to the raw
+  string otherwise. Verified: a `["dog", "bark"]`-shaped cell decodes to
+  an actual list; a plain string cell that merely starts differently is
+  left untouched (`tests/test_dataset.py`).
+
+- **Deliberate resume/fresh control.** `gepa.optimize()` resumes
+  automatically from `gepa_state.bin` if `run_dir` already has one --
+  this is exactly what served stale, pre-bug-fix results earlier in this
+  project's own history (see the bug log below) when a leftover state
+  file from a failed run got silently reused. `gepa-opt optimize` now
+  refuses outright when that file exists and neither `--resume` nor
+  `--fresh` was passed, rather than silently picking a behavior on the
+  user's behalf; `--fresh` archives the old run_dir (renamed with a
+  timestamp, not deleted) before starting clean. Verified against a real
+  run: `--fresh` archived to `runs/latest_archived_<timestamp>` and
+  started over; `--resume` continued in place with no archiving and
+  printed gepa's own "Loading gepa state from run dir".
+
+- **Word-level diffs and a full candidate list in `report.md`.** Two
+  gaps closed together: (1) "seed vs. best" showed two full text blocks
+  to eyeball instead of what actually changed; (2) nothing gave a direct
+  answer to "can the user see every prompt generated" -- `result.json`
+  has every candidate as raw JSON, and `candidate_tree.html` shows full
+  text on hover, but nothing presented a readable, linear list of every
+  candidate tried. `report.word_diff_markdown()` (stdlib `difflib`, word
+  granularity, `~~removed~~`/`**added**` markdown) now drives both the
+  seed-vs-best section and a new "All candidates tried" section listing
+  every candidate with a diff from its immediate parent (full text
+  instead, for the seed or a two-parent merge result, where a single-
+  parent diff would be misleading). `tests/test_report.py` covers the
+  diff helper directly.
+
+- **Merge enabled by default.** `use_merge=True` (GEPA's crossover
+  between two Pareto-frontier candidates, on top of reflective mutation)
+  is now a config field, defaulting on. Verified against the real engine
+  with a scenario that actually produces more than one frontier
+  candidate: the merge proposer engaged and correctly logged "No merge
+  candidates found" when there was nothing complementary to combine,
+  rather than erroring -- confirms the wiring is correct and safe even
+  when a merge opportunity doesn't happen to exist in a given run.
+
 ## Decisions made since, and why
 
 These came out of the vision as the architecture got built, each one a
@@ -252,6 +308,17 @@ direct answer to a constraint that showed up along the way:
   `gemini/gemini-2.5-flash` (less-frequent reflection calls), both free with
   just a `GEMINI_API_KEY`. Any other litellm-supported provider works too —
   it's one line in config.
+
+- **The skill narrates every phase, not just the two hard gates.** Early
+  versions only stopped the user at Phase 0 (confirm the workflow
+  understanding) and Phase 3 (approve the metric) — everything else
+  happened silently in between. The user asked explicitly for status
+  updates throughout, and separately pointed out that Phase 2's "edit
+  workflow.yaml yourself" instruction never actually said to *show* the
+  user the result before moving on. Both fixed: the skill's intro now
+  states the narration expectation up front, Phase 2 gets an explicit
+  show-and-confirm step, and Phase 4 explicitly says to announce the run
+  starting and finishing rather than going quiet for its duration.
 
 ## Where each vision step actually lives
 
@@ -328,6 +395,10 @@ session doesn't rediscover the same gap from scratch:
   `gepa_state.bin` if `run_dir` already has one, including bad runs from
   before a bug fix -- it'll silently replay the old (broken) results instead
   of re-evaluating. `rm -rf <run_dir>` before any re-run meant to test a fix.
+  **Fixed properly later** (see "Engine robustness improvements" above):
+  `gepa-opt optimize` now refuses when `gepa_state.bin` exists unless
+  `--resume` or `--fresh` is passed explicitly, instead of leaving this as
+  a manual `rm -rf` discipline problem.
 - **There already was a real log, just undocumented**: `gepa.optimize()`
   writes `run_log.txt`/`run_log_stderr.txt` into `run_dir` automatically
   (its default `Logger`, since we pass `run_dir` without overriding

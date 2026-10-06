@@ -91,20 +91,38 @@ figure out *why* a candidate failed and what to change. "score: 0.3" tells it
 nothing; "expected 'Paris', got a three-sentence hedge" tells it exactly what
 to fix.
 
-Once you're happy with `metric.py`:
+Before running the real thing, a cheap sanity check against a couple of
+real rows — catches a wrong field name, a missing dependency, or a broken
+`task_lm` before it burns real budget:
+
+```bash
+gepa-opt validate
+```
+
+Once that's clean and you're happy with `metric.py`:
 
 ```bash
 gepa-opt optimize --max-metric-calls 150
 gepa-opt report
 ```
 
+If `runs/latest/` already has a previous run in it, `optimize` refuses and
+asks you to pick explicitly: `--resume` to continue it, or `--fresh` to
+archive it (renamed with a timestamp, not deleted) and start over. This is
+deliberate — `gepa.optimize()` resumes silently by default, which once
+served stale pre-bug-fix results in this project's own history (see
+`AGENTS.md`'s bug log).
+
 `optimize` writes everything under `runs/latest/`:
 
 - `result.json` — every candidate tried, its lineage, and its score
 - `best_candidate.json` — just the winner
 - `candidate_tree.html` — an interactive view of how candidates evolved
-- `report.md` — the human-readable summary (best prompt vs. seed, score
-  trajectory, Pareto frontier size)
+- `report.md` — the human-readable summary: score trajectory, a word-level
+  diff of what changed (seed vs. best), and an **"All candidates tried"**
+  section listing every single candidate GEPA explored with a diff from
+  its immediate parent — the direct answer to "can I see every prompt it
+  generated," not just the seed and the winner
 - `run_log.txt` / `run_log_stderr.txt` — `gepa`'s own live log: every
   iteration, every reflection attempt, retries and errors verbatim (written
   automatically because `run_dir` is set; this is the thing to tail if a run
@@ -359,6 +377,7 @@ not just the "how."
 | `frontier_type="hybrid"` + `EvaluationBatch.objective_scores` | for `classification`-style metrics: a *separate* Pareto frontier per objective (`recall_proxy`, `precision_proxy`), not one hand-weighted scalar — set automatically, not user-configured |
 | `test_fraction` in `gepa.config.yaml` | opt-in held-out split (default off) GEPA never searches against, for a seed-vs-best sanity check against overfitting to valset |
 | `max_workers` in `gepa.config.yaml` | rows within one evaluation batch run concurrently above 1 — default 1 (sequential) to avoid worsening provider rate limits |
+| `use_merge` in `gepa.config.yaml` | crossover between two Pareto-frontier candidates, on top of reflective mutation — on by default |
 | `run_dir` + our own `result.json`/`report.md` dump | every candidate, score, and lineage, kept on disk |
 
 ## Development

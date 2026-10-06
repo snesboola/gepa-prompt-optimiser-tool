@@ -29,8 +29,30 @@ def load_dataset(path: str | Path) -> list[dict[str, Any]]:
         return data
     if path.suffix == ".csv":
         with path.open(newline="") as f:
-            return list(csv.DictReader(f))
+            return [_decode_csv_row(row) for row in csv.DictReader(f)]
     raise ValueError(f"Unsupported dataset format: {path.suffix} (use .jsonl, .json, or .csv)")
+
+
+def _decode_csv_row(row: dict[str, str]) -> dict[str, Any]:
+    """csv.DictReader returns every cell as a plain string, with no concept
+    of a list-typed column. A metric expecting `row["required_keywords"]`
+    to be a list (keyword_presence, composite) would otherwise silently
+    iterate the raw string character-by-character instead of raising --
+    wrong, but no error, which is worse. Cells that look like a JSON array
+    or object get decoded; anything else (including a cell that merely
+    starts with '[' but isn't valid JSON) is left as the original string.
+    """
+    decoded: dict[str, Any] = {}
+    for key, value in row.items():
+        stripped = value.strip() if isinstance(value, str) else value
+        if isinstance(stripped, str) and stripped[:1] in "[{":
+            try:
+                decoded[key] = json.loads(stripped)
+                continue
+            except json.JSONDecodeError:
+                pass
+        decoded[key] = value
+    return decoded
 
 
 def inspect_dataset(rows: list[dict[str, Any]], sample_size: int = 3) -> dict[str, Any]:

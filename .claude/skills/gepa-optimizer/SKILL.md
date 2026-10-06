@@ -21,6 +21,17 @@ This skill is what makes *using* it feel like a conversation instead of
 hand-writing YAML and flags. Follow these phases in order; do not skip the
 approval gates.
 
+**Narrate every phase, not just the two hard gates.** Before starting a
+phase, say in one line what you're about to do and why. After finishing
+one, say in one or two lines what happened before moving to the next —
+don't silently do several minutes of work (reading a workflow file,
+scaffolding a metric, running a search) and only speak again once
+everything is completely done. The user should always be able to tell
+which phase you're in and what you just found, not just see a final
+report at the end. Phases 0 and 3 are *approval* gates (stop and wait for
+an explicit answer); the others still get a visible status update, just
+not a blocking one.
+
 ## Prerequisites
 
 The user has (or will point you at) a project folder containing:
@@ -99,14 +110,22 @@ If `gepa.config.yaml` doesn't exist yet:
 gepa-opt init --goal "<goal>" --criteria "<criteria>"
 ```
 
-Then edit the generated `workflow.yaml` yourself (don't just hand it to the
-user unedited) to actually represent their system: one node per LLM call,
-in order, with the target node(s) marked `optimize: true` and everything
-else `optimize: false`. Reuse the user's real prompt text as the seed — the
-whole point is evolving *their* prompt, not a placeholder.
+Then edit the generated `workflow.yaml` yourself — don't hand the user a
+raw, unfilled scaffold to complete themselves — so it actually represents
+their system: one node per LLM call, in order, with the target node(s)
+marked `optimize: true` and everything else `optimize: false`. Reuse the
+user's real prompt text as the seed — the whole point is evolving *their*
+prompt, not a placeholder.
 
 Point `dataset` at their real file. If it's CSV/JSON instead of JSONL, the
 loader already handles that — just update `dataset:` in `gepa.config.yaml`.
+
+Once wired up, show the user the resulting `workflow.yaml` (or a summary
+of the node graph: what's the target, what's held fixed) and confirm it
+actually represents their system before moving to Phase 3 — editing it
+yourself means doing the work, not skipping the check-in. A wrong node
+marked as the target, or the wrong text reused as the seed, wastes the
+entire run that follows.
 
 ### Non-native workflow sources
 
@@ -201,6 +220,22 @@ seen.
 
 ## Phase 4 — Run it
 
+First, a cheap pre-flight check — don't skip this, several real bugs in
+this project's own history only surfaced mid-run, after spending real
+budget, because nothing checked the plumbing first:
+
+```bash
+gepa-opt validate
+```
+
+This runs the approved metric against a couple of real rows. If it fails,
+fix the problem (missing dependency, wrong field name, bad `judge_lm`
+wiring) and re-validate before going further — don't proceed to a real run
+on a known-broken metric.
+
+Then tell the user you're starting the real run, with the budget and a
+rough sense of cost/time, and run it:
+
 ```bash
 gepa-opt optimize --max-metric-calls <budget>
 ```
@@ -211,6 +246,23 @@ wants a thorough search. Mention the budget/cost tradeoff to the user before
 running anything large. Requires `ANTHROPIC_API_KEY` (or whatever provider
 `task_lm`/`reflection_lm` in `gepa.config.yaml` need) to be set — check for it
 and ask if missing, don't just fail silently into a wall of tracebacks.
+Once it's running, let the user know it's underway (this can take a few
+minutes) rather than going silent until it's completely done — a brief
+"optimization is running now, N candidates explored so far" if you're
+checking in partway through is better than nothing. Confirm clearly when
+it finishes, before moving to Phase 5.
+
+If `runs/latest/gepa_state.bin` already exists from a previous run,
+`gepa-opt optimize` refuses and asks you to choose explicitly: `--resume`
+to continue that run, or `--fresh` to archive it and start over. Don't
+guess on the user's behalf here — ask which they want; silently resuming
+served stale pre-bug-fix results earlier in this project's own history,
+and silently archiving could throw away a run they wanted to keep.
+
+Merge (crossover between two Pareto-frontier candidates, on top of
+reflective mutation) is on by default — no action needed, but worth
+knowing about if the user asks why a candidate has two parents instead of
+one in the results.
 
 For a small dataset (≤25 training rows), `runner.py` already defaults the
 reflection minibatch to the *whole* training set rather than GEPA's own
@@ -241,21 +293,31 @@ mistaken for a legitimately low score.
 ## Phase 5 — Deliver results
 
 Everything lives under `runs/latest/` (per `run_dir` in config):
-- `report.md` — read this and present its contents conversationally (best
-  prompt vs. seed, score trajectory, Pareto frontier size).
+- `report.md` — read this and present its contents conversationally. Its
+  "Best prompt(s) vs. seed" section leads with a word-level diff (what
+  actually changed, not two full blocks to eyeball), with the full seed
+  and evolved text available below it. Its "All candidates tried" section
+  lists *every* candidate GEPA explored, each with a diff from its
+  immediate parent — this is the literal answer to "can the user see
+  every prompt generated": yes, here, not just the seed and the winner.
 - `best_candidate.json` — the winning prompt(s) alone.
-- `result.json` — every candidate tried, with lineage and scores (this is
-  the "all the different approaches tried" the user asked for).
-- `candidate_tree.html` — interactive lineage view.
+- `result.json` — every candidate tried, with lineage and scores, as raw
+  JSON (`report.md`'s "All candidates tried" is the readable version of
+  this).
+- `candidate_tree.html` — interactive lineage view; hovering a node shows
+  its full prompt text.
 
 Give the user:
 1. The best prompt, clearly, ready to paste back into their real system —
    named by its role in the workflow (Phase 0's mental model), not just
    "the prompt" (e.g. "your reply-drafting node's new system prompt").
 2. A short narrative of what changed and why (pull this from the top
-   candidates' score deltas and feedback, not just "it got better").
+   candidates' score deltas and feedback, not just "it got better") — the
+   word-diff in `report.md` is good material for this, quote it rather
+   than re-describing the change in your own words.
 3. Where the full cache lives, so they can dig into any candidate that
-   didn't win.
+   didn't win — point specifically at the "All candidates tried" section,
+   since that's the direct answer if they ask to see every approach tried.
 
 If this session has artifact publishing available, consider turning
 `report.md` (plus the lineage tree) into a published summary page rather
