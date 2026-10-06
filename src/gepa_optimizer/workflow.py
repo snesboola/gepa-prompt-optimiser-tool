@@ -28,12 +28,38 @@ class WorkflowNode:
     type: str  # "llm" (calls the task LM) or "template" (pure text substitution, no LM call)
     system: str | None = None
     user: str | None = None
-    optimize: bool = False
+    # False, True, "system", or "user". A node can carry both a system and a
+    # user text; `optimize` must say which one GEPA is allowed to evolve. The
+    # bare boolean `True` is only accepted when exactly one of system/user is
+    # set -- if both are set it's ambiguous and must be spelled out.
+    optimize: bool | str = False
 
     def render(self, context: dict[str, Any]) -> tuple[str | None, str | None]:
         system_text = Template(self.system).safe_substitute(context) if self.system else None
         user_text = Template(self.user).safe_substitute(context) if self.user else None
         return system_text, user_text
+
+    def optimized_field(self) -> str | None:
+        """Which field ('system' or 'user') `optimize` targets, or None if this
+        node isn't optimized at all. Raises if the target is ambiguous."""
+        if not self.optimize:
+            return None
+        if self.optimize in ("system", "user"):
+            if getattr(self, self.optimize) is None:
+                raise ValueError(f"Node {self.id!r} has optimize={self.optimize!r} but no {self.optimize} text")
+            return self.optimize
+        if self.optimize is True:
+            if self.system is not None and self.user is not None:
+                raise ValueError(
+                    f"Node {self.id!r} has both `system` and `user` text and `optimize: true`. "
+                    "Ambiguous -- specify which field to evolve with `optimize: system` or `optimize: user`."
+                )
+            if self.system is not None:
+                return "system"
+            if self.user is not None:
+                return "user"
+            raise ValueError(f"Node {self.id!r} has optimize: true but no system/user text to evolve")
+        raise ValueError(f"Node {self.id!r} has invalid optimize value: {self.optimize!r}")
 
 
 @dataclass
@@ -60,10 +86,12 @@ class WorkflowSpec:
                 type=n.get("type", "llm"),
                 system=n.get("system"),
                 user=n.get("user"),
-                optimize=bool(n.get("optimize", False)),
+                optimize=n.get("optimize", False),
             )
             for n in data["nodes"]
         ]
+        for n in nodes:
+            n.optimized_field()  # validates (raises) eagerly, even for non-optimized nodes with bad values
         if not any(n.optimize for n in nodes):
             raise ValueError(
                 "workflow.yaml declares no node with `optimize: true` -- "
@@ -73,12 +101,12 @@ class WorkflowSpec:
 
     def seed_candidate(self) -> dict[str, str]:
         """The starting candidate: component id -> current prompt text, for every
-        optimizable node. GEPA evolves exactly these entries."""
+        optimizable node. GEPA evolves exactly the field `optimize` targets."""
         candidate = {}
         for n in self.nodes:
-            if n.optimize:
-                # Prefer the user template as the evolvable text; fall back to system.
-                candidate[n.id] = n.user if n.user is not None else (n.system or "")
+            field_name = n.optimized_field()
+            if field_name is not None:
+                candidate[n.id] = getattr(n, field_name) or ""
         return candidate
 
 
@@ -119,11 +147,12 @@ class WorkflowRunner:
         last_output = None
 
         for n in self.spec.nodes:
+            target_field = n.optimized_field()
             effective = WorkflowNode(
                 id=n.id,
                 type=n.type,
-                system=candidate.get(n.id) if n.optimize and n.system is not None else n.system,
-                user=candidate.get(n.id) if n.optimize and n.user is not None else n.user,
+                system=candidate.get(n.id) if target_field == "system" else n.system,
+                user=candidate.get(n.id) if target_field == "user" else n.user,
                 optimize=n.optimize,
             )
             system_text, user_text = effective.render(context)
