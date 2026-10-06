@@ -101,8 +101,8 @@ direct answer to a constraint that showed up along the way:
 
 | Step | Where |
 |---|---|
-| 1. Dataset + workflow folder | `dataset.py` (JSONL/JSON/CSV loader) + `workflow.yaml` (generic now; a real Dify export is translated by hand for now, see the skill's "Non-native workflow sources" section — automatic Dify parsing is the deferred branch) |
-| 2. Goal/criteria/target/constraints | Gathered conversationally by the skill (Phase 1), stored in `gepa.config.yaml`'s `goal`/`criteria` fields, expressed as `optimize: system\|user` on the target node(s) |
+| 1. Dataset + workflow folder | `dataset.py` (JSONL/JSON/CSV loader) + `workflow.yaml` (generic now; a real Dify export is read in full and understood -- architecture, data flow, intent, not just the target node -- then translated by hand, per the skill's Phase 0 and "Non-native workflow sources" section; automatic Dify parsing is the deferred branch) |
+| 2. Goal/criteria/target/constraints | Gathered conversationally by the skill (Phase 1), informed by Phase 0's understanding of the workflow (sharper questions, catches downstream-format constraints the user might not think to state); stored in `gepa.config.yaml`'s `goal`/`criteria` fields, expressed as `optimize: system\|user` on the target node(s) |
 | 3. Scoring function, proposed then approved | `gepa-opt suggest-metric` scaffolds (`metrics.py`); the skill rewrites it to actually match the stated criteria/constraints and stops for explicit approval before running anything (Phase 3 — a hard gate, never skipped) |
 | 4. GEPA runs recursively | `runner.py` → the real `gepa.optimize()`, via `WorkflowGEPAAdapter` (`adapter.py`) |
 | 5. Best prompt + cached runs + approaches + summary | `run_dir` (`runs/latest/`): `best_candidate.json`, `result.json` (every candidate + lineage + score), `candidate_tree.html`, and `report.md` (the human-readable summary, built by `report.py`). `write_agent_state` (a per-iteration `iterations/` trace tree) exists upstream only on `gepa`'s unreleased `main` branch, not the installed `0.1.4` -- see the "real bug log" note below |

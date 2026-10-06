@@ -31,10 +31,49 @@ The user has (or will point you at) a project folder containing:
 
 If the folder has no `gepa.config.yaml` yet, this is a new project.
 
+## Phase 0 — Understand the whole workflow first
+
+Before asking the user anything or touching any file, read the *entire*
+workflow/agent definition they handed you — not just the node that looks
+like the target prompt. This matters most for a platform export (e.g. a
+Dify DSL YAML), which encodes a full graph most users won't have described
+to you otherwise:
+
+- Read every node (`workflow.graph.nodes`) and every edge between them, the
+  app's own `name`/`description` metadata, and any conditional branches,
+  retrieval/tool nodes, or code nodes.
+- Build an actual mental model: what is this workflow *for* (the end-user
+  problem it solves), what role does each node play in solving it, and how
+  does data actually flow from entry to final output?
+- Specifically work out what feeds *into* the likely target node and what
+  consumes its output downstream — a node three steps later expecting
+  strict JSON from the target node is a constraint the user may not think
+  to mention, but GEPA breaking it silently would make the "optimized"
+  prompt useless in production.
+
+State this understanding back in a few plain sentences before proceeding —
+e.g. "this looks like a support-ticket triage system: an intent classifier
+picks a queue, a retrieval node pulls relevant docs, and a reply-drafting
+node (your likely target) writes the response using both." Ask the user to
+confirm or correct it. This is cheap to get wrong here and expensive to
+discover after burning optimization budget on a misread workflow — treat it
+as seriously as the Phase 3 approval gate, even though it's lighter-weight.
+
+Carry this understanding forward: it should sharpen the questions in Phase
+1, catch downstream-format constraints for Phase 2's translation and Phase
+3's metric, and give you the vocabulary to explain results in Phase 5 in
+terms of what the workflow is actually trying to do.
+
+For a plain prompt file or an already-generic `workflow.yaml` with no
+surrounding platform graph, this phase is quick — there's less to map out,
+but still skim the whole file rather than jumping straight to the prompt
+text.
+
 ## Phase 1 — Understand the ask
 
 Ask (conversationally, not as a form) for whatever isn't already obvious
-from context:
+from context — informed by what Phase 0 told you about the workflow, not as
+a generic intake form:
 - **Goal**: what "better" means for this prompt, in plain language.
 - **Target**: which part of the workflow should actually change. If there's
   more than one LLM call in the system, get the user to point at the one
@@ -73,20 +112,25 @@ loader already handles that — just update `dataset:` in `gepa.config.yaml`.
 
 If the user's "workflow" is actually an export from another platform (e.g. a
 Dify DSL YAML) rather than something you can run directly: for this generic
-branch, translate it by hand — read the platform file, identify the node(s)
-containing the target prompt(s) and how data flows between them, and
-represent that same shape in `workflow.yaml`. Tell the user plainly that this
-runs the prompt logic standalone (direct LLM calls), not inside their actual
-platform runtime (no tools/retrieval/side-effects from other nodes) — see
-`docs/adapters.md` if they want the real thing wired up instead of this
-translation.
+branch, translate it by hand using the full mental model you built in Phase
+0, not just the target node in isolation. Represent that same shape in
+`workflow.yaml` — fixed upstream nodes feeding the target with real
+variable names, the target itself, and (if relevant to scoring) a
+downstream node that shows what format its output actually needs to be in.
+Tell the user plainly that this runs the prompt logic standalone (direct
+LLM calls), not inside their actual platform runtime (no tools/retrieval/
+side-effects from other nodes) — see `docs/adapters.md` if they want the
+real thing wired up instead of this translation.
 
 ## Phase 3 — Propose a scoring function, then stop for approval
 
 This is a hard gate. Never run optimization against a metric the user hasn't
 seen.
 
-1. Look at a sample of the real dataset and the stated criteria/constraints.
+1. Look at a sample of the real dataset, the stated criteria/constraints,
+   and what Phase 0 told you about what consumes this node's output — a
+   downstream format requirement is a hard constraint even if the user
+   never said it explicitly.
 2. Pick the closest starting template (`exact_match`, `keyword_presence`, or
    `llm_judge`) and scaffold it:
    ```bash
@@ -128,7 +172,9 @@ Everything lives under `runs/latest/` (per `run_dir` in config):
 - `candidate_tree.html` — interactive lineage view.
 
 Give the user:
-1. The best prompt, clearly, ready to paste back into their real system.
+1. The best prompt, clearly, ready to paste back into their real system —
+   named by its role in the workflow (Phase 0's mental model), not just
+   "the prompt" (e.g. "your reply-drafting node's new system prompt").
 2. A short narrative of what changed and why (pull this from the top
    candidates' score deltas and feedback, not just "it got better").
 3. Where the full cache lives, so they can dig into any candidate that
