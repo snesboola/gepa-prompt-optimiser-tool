@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gepa-optimizer"
+version = "0.1.0"
+description = "Agent-agnostic GEPA (reflective prompt evolution) optimizer for workflow-based LLM systems."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "gepa>=0.1.4",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+gepa-opt = "gepa_optimizer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
