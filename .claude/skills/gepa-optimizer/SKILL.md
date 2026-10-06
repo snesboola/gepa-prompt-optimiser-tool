@@ -127,10 +127,28 @@ real thing wired up instead of this translation.
 This is a hard gate. Never run optimization against a metric the user hasn't
 seen.
 
-1. Look at a sample of the real dataset, the stated criteria/constraints,
-   and what Phase 0 told you about what consumes this node's output — a
-   downstream format requirement is a hard constraint even if the user
-   never said it explicitly.
+1. Actually inspect the dataset before assuming anything about its
+   structure — don't guess column names:
+   ```bash
+   gepa-opt inspect-dataset
+   ```
+   This prints every real column, a cheap distinct-value-count heuristic
+   flagging some as "likely categorical," and a few sample rows. Treat
+   that heuristic as a weak hint, not an answer — it has no idea what a
+   column *means*, only how many distinct values it happens to have, and
+   it's already known to misfire (it flagged a repeated context passage as
+   "likely categorical" in `examples/hallucination_judge_demo` just
+   because the demo dataset was small enough that a few context strings
+   repeated). You're the one who should actually read the column names and
+   sample values and reason about which one is the label/reference/
+   whatever-field, the same way you'd read any other data — that's exactly
+   the kind of judgment call a fixed statistical threshold can't make but
+   you can (recognizing "verdict" or "is_fraud" or "ground_truth" as a
+   label column from its name and values, independent of how many distinct
+   values it has). Cross-reference this with the stated criteria/
+   constraints and what Phase 0 told you about what consumes this node's
+   output — a downstream format requirement is a hard constraint even if
+   the user never said it explicitly.
 2. Pick the closest starting template and scaffold it:
    ```bash
    gepa-opt suggest-metric --type <type>
@@ -164,7 +182,16 @@ seen.
    logic actually matches the stated criteria and constraints — the
    scaffold is a starting shape, not a finished metric. Encode every hard
    constraint as an explicit check that forces score to 0 with feedback
-   naming which constraint broke.
+   naming which constraint broke. This includes field names:
+   `classification`/`exact_match`/`keyword_presence` scaffold a real,
+   used constant (`LABEL_FIELD`/`REFERENCE_FIELD`/`REQUIRED_KEYWORDS_FIELD`)
+   defaulting to a guessed name ("label", "reference", ...) — set it to
+   whatever you determined the real column is called in step 1, from your
+   own reading of the data, not from the tool's categorical-heuristic
+   suggestion alone. `suggest-metric` will warn if the default name isn't
+   in the dataset's columns and list the heuristic's candidates, but that
+   warning is a safety net for catching an *unedited* scaffold, not a
+   substitute for you actually having looked.
 4. Make sure the feedback strings are specific (what was expected, what was
    produced, which rule it violated) — vague feedback produces vague
    mutations; this is the single biggest lever on optimization quality.
@@ -191,6 +218,25 @@ reflection minibatch to the *whole* training set rather than GEPA's own
 results look stable rather than noisy run to run. For a larger dataset,
 `gepa.config.yaml`'s `reflection_minibatch_size` field can be set explicitly
 if the default (GEPA's own sampling) isn't giving a stable enough signal.
+
+Two more config knobs, both off by default, worth raising if the user asks:
+- `test_fraction` (default `0.0`): carves out a held-out split GEPA never
+  searches against, for an honest seed-vs-best sanity check in the final
+  report. Worth turning on once the dataset has enough rows that train/val/
+  test can each still mean something (a few dozen total, at least) — don't
+  suggest it on a tiny demo-sized dataset, it'll leave almost nothing in
+  each split.
+- `max_workers` (default `1`): runs a batch's rows concurrently above 1.
+  Only raise this if the user confirms their provider's rate limits can
+  take it — this session hit real `429` quota errors from *sequential*
+  calls alone; don't make that worse by suggesting concurrency as a
+  default speedup.
+
+If a run's score looks suspiciously flat at 0.0 across every candidate,
+check `run_log.txt` for a `RuntimeError` about every example in a batch
+raising an exception before assuming the prompt itself is just bad —
+`adapter.evaluate()` raises loudly in that case specifically so it isn't
+mistaken for a legitimately low score.
 
 ## Phase 5 — Deliver results
 

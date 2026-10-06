@@ -90,3 +90,94 @@ def test_adapter_evaluate_scores_and_reflective_dataset():
     reflective = adapter.make_reflective_dataset(candidate, result, components_to_update=["system_prompt"])
     assert len(reflective["system_prompt"]) == 2
     assert "expected" in reflective["system_prompt"][1]["Feedback"]
+
+
+def test_adapter_raises_when_every_row_in_batch_raises():
+    spec = WorkflowSpec(
+        nodes=[WorkflowNode(id="system_prompt", type="llm", system="x", user="$input", optimize="system")],
+        final_output="system_prompt",
+    )
+
+    def broken_task_lm(messages):
+        raise ModuleNotFoundError("No module named 'litellm'")  # simulates today's real failure mode
+
+    def score_fn(row, trace):
+        return 1.0, "ok"  # never actually reached -- every row fails before scoring
+
+    adapter = WorkflowGEPAAdapter(spec=spec, task_lm=broken_task_lm, score_fn=score_fn)
+    batch = [{"input": "a"}, {"input": "b"}]
+
+    with pytest.raises(RuntimeError, match="raised an exception"):
+        adapter.evaluate(batch, spec.seed_candidate(), capture_traces=True)
+
+
+def test_adapter_does_not_raise_when_only_some_rows_fail():
+    spec = WorkflowSpec(
+        nodes=[WorkflowNode(id="system_prompt", type="llm", system="x", user="$input", optimize="system")],
+        final_output="system_prompt",
+    )
+
+    def flaky_task_lm(messages):
+        user_msg = next(m["content"] for m in messages if m["role"] == "user")
+        if user_msg == "fail_me":
+            raise RuntimeError("simulated transient failure")
+        return f"echo: {user_msg}"
+
+    def score_fn(row, trace):
+        return 1.0, "ok"
+
+    adapter = WorkflowGEPAAdapter(spec=spec, task_lm=flaky_task_lm, score_fn=score_fn)
+    batch = [{"input": "fail_me"}, {"input": "fine"}]
+
+    result = adapter.evaluate(batch, spec.seed_candidate(), capture_traces=True)  # must not raise
+    assert result.scores == [0.0, 1.0]
+    assert "Execution error" in result.trajectories[0].feedback
+
+
+def test_adapter_parallel_execution_preserves_order_and_correctness():
+    spec = WorkflowSpec(
+        nodes=[WorkflowNode(id="system_prompt", type="llm", system="x", user="$input", optimize="system")],
+        final_output="system_prompt",
+    )
+
+    def score_fn(row, trace):
+        return (1.0, "ok") if trace["final_output"] == f"echo: {row['input']}" else (0.0, "mismatch")
+
+    adapter = WorkflowGEPAAdapter(spec=spec, task_lm=fake_task_lm, score_fn=score_fn, max_workers=4)
+    batch = [{"input": str(i)} for i in range(10)]
+
+    result = adapter.evaluate(batch, spec.seed_candidate(), capture_traces=True)
+
+    assert result.scores == [1.0] * 10  # every row matched its own input, not some other thread's
+    assert [t.row["input"] for t in result.trajectories] == [str(i) for i in range(10)]
+
+
+def test_adapter_computes_recall_precision_objective_scores_when_classify_fn_given():
+    spec = WorkflowSpec(
+        nodes=[WorkflowNode(id="judge", type="llm", system="x", user="$input", optimize="system")],
+        final_output="judge",
+    )
+
+    def score_fn(row, trace):
+        return 1.0, "ok"
+
+    def classify_fn(row, trace):
+        return "HALLUCINATED" if "bad" in trace["final_output"] else "GROUNDED"
+
+    adapter = WorkflowGEPAAdapter(
+        spec=spec,
+        task_lm=fake_task_lm,
+        score_fn=score_fn,
+        classify_fn=classify_fn,
+        positive_label="HALLUCINATED",
+    )
+    # row 0: expected HALLUCINATED, task_lm echoes "bad" -> classified HALLUCINATED -> TP
+    # row 1: expected GROUNDED, task_lm echoes "good" -> classified GROUNDED -> TN
+    batch = [{"input": "bad", "label": "HALLUCINATED"}, {"input": "good", "label": "GROUNDED"}]
+
+    result = adapter.evaluate(batch, spec.seed_candidate(), capture_traces=True)
+
+    assert result.objective_scores == [
+        {"recall_proxy": 1.0, "precision_proxy": 1.0},
+        {"recall_proxy": 1.0, "precision_proxy": 1.0},
+    ]

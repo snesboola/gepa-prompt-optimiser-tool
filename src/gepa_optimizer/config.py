@@ -36,7 +36,18 @@ class ProjectConfig:
     # explicit int to override either way.
     reflection_minibatch_size: int | None = None
     val_fraction: float = 0.3
+    # Opt-in (0.0 = off): a held-out split GEPA never sees during search, used
+    # only for a final seed-vs-best sanity check against overfitting to the
+    # validation set. Worth turning on once you have enough rows that train/
+    # val/test can each still be meaningful (a few dozen total, at least).
+    test_fraction: float = 0.0
     seed: int = 0
+    # How many rows to evaluate concurrently within one evaluate() call (not
+    # across GEPA's own iterations, which stay sequential). Keep at 1 unless
+    # you know your task_lm's rate limits can take it -- firing several
+    # requests at once is exactly what triggered the free-tier 429s logged in
+    # AGENTS.md. Safe to raise on a paid tier or a higher-limit provider.
+    max_workers: int = 1
     run_dir: str = "runs/latest"
     goal: str = ""
     criteria: str = ""

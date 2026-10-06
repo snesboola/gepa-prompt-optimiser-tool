@@ -35,6 +35,20 @@ class MetricModule(Protocol):
     def score(self, row: dict[str, Any], trace: dict[str, Any]) -> tuple[float, str]: ...
 
 
+# Field name(s) each template's scaffolded score() assumes exist on every
+# row. Used to warn (not guess/auto-rename -- a wrong guess is worse than no
+# guess) when a dataset's actual columns don't contain what the chosen
+# template expects, so a mismatch surfaces before a run, not as a confusing
+# KeyError or a silently-always-empty fallback partway through one.
+TEMPLATE_EXPECTED_FIELDS: dict[str, list[str]] = {
+    "exact_match": ["reference"],
+    "keyword_presence": ["required_keywords"],
+    "llm_judge": [],
+    "classification": ["label"],
+    "composite": [],
+}
+
+
 def load_metric_module(path: str | Path):
     path = Path(path)
     spec = importlib.util.spec_from_file_location("gepa_optimizer_metric", path)
@@ -49,6 +63,52 @@ def load_metric_module(path: str | Path):
 
 def load_metric(path: str | Path) -> ScoreFn:
     return load_metric_module(path).score
+
+
+def confusion_outcome(expected: str, predicted: str, positive_label: str) -> str:
+    """Classify one (expected, predicted) pair as "tp"/"fp"/"tn"/"fn"."""
+    is_pos_expected = expected == positive_label
+    is_pos_predicted = predicted == positive_label
+    if is_pos_expected and is_pos_predicted:
+        return "tp"
+    if is_pos_expected and not is_pos_predicted:
+        return "fn"
+    if not is_pos_expected and is_pos_predicted:
+        return "fp"
+    return "tn"
+
+
+def recall_precision_objective_scores(expected: str, predicted: str, positive_label: str) -> dict[str, float]:
+    """Per-row proxy objectives for GEPA's *native* multi-objective Pareto
+    tracking (`objective_scores` in `EvaluationBatch`, `frontier_type=
+    "hybrid"`/`"objective"`), as an alternative to folding recall/precision
+    into one hand-weighted scalar (see the `classification` template).
+
+    GEPA aggregates objective scores as a plain mean over the valset (see
+    `gepa.core.state.GEPAState._aggregate_objective_scores`) -- the same
+    aggregation `val_aggregate_scores` uses for the main score. That has a
+    real consequence for how trustworthy each of these two proxies is:
+
+    - `recall_proxy`: 0.0 only on a false negative, 1.0 otherwise. For a
+      FIXED valset, the count of positive-labeled rows (N_pos) and total
+      rows (N_total) don't change between candidates -- only TP does. So
+      mean(recall_proxy) = 1 - FN/N_total = const + TP/N_total, which is an
+      exact affine transform of real recall (= TP/N_pos, since N_pos =
+      TP+FN is fixed): maximizing one exactly maximizes the other. This one
+      is provably sound, not just a heuristic.
+    - `precision_proxy`: 0.0 only on a false positive, 1.0 otherwise. This
+      is NOT an exact proxy for real precision (= TP/(TP+FP)) -- TP varies
+      per candidate too (unlike N_pos for recall), so a candidate that
+      avoids false positives by predicting positive rarely at all (low FP
+      *and* low TP) scores well here without necessarily having high real
+      precision. Treat this one as a reasonable heuristic push, not a
+      guarantee -- `classification_report()` remains the source of truth.
+    """
+    outcome = confusion_outcome(expected, predicted, positive_label)
+    return {
+        "recall_proxy": 0.0 if outcome == "fn" else 1.0,
+        "precision_proxy": 0.0 if outcome == "fp" else 1.0,
+    }
 
 
 def classification_report(
@@ -78,16 +138,15 @@ def classification_report(
     for row, trace in zip(rows, traces):
         expected = str(row[label_field]).strip().upper()
         predicted = classify_fn(row, trace)
-        if expected == positive_label:
-            if predicted == positive_label:
-                tp += 1
-            else:
-                fn += 1
+        outcome = confusion_outcome(expected, predicted, positive_label)
+        if outcome == "tp":
+            tp += 1
+        elif outcome == "fn":
+            fn += 1
+        elif outcome == "fp":
+            fp += 1
         else:
-            if predicted == positive_label:
-                fp += 1
-            else:
-                tn += 1
+            tn += 1
 
     recall = tp / (tp + fn) if (tp + fn) else None
     precision = tp / (tp + fp) if (tp + fp) else None
@@ -111,14 +170,18 @@ TEMPLATES: dict[str, str] = {
 Goal: {goal}
 Criteria: {criteria}
 
-Expects each dataset row to have a `reference` field holding the exact
-expected final answer. Edit the comparison logic below to fit your task
-(e.g. case-insensitive, strip punctuation) before approving.
+Expects each dataset row to have a reference field (named by REFERENCE_FIELD
+below -- edit this if your dataset's column isn't literally called
+"reference") holding the exact expected final answer. Edit the comparison
+logic below to fit your task (e.g. case-insensitive, strip punctuation)
+before approving.
 """
+
+REFERENCE_FIELD = "reference"  # edit to your dataset's actual column name
 
 
 def score(row: dict, trace: dict) -> tuple[float, str]:
-    expected = str(row.get("reference", "")).strip()
+    expected = str(row.get(REFERENCE_FIELD, "")).strip()
     actual = str(trace["final_output"]).strip()
 
     if actual == expected:
@@ -134,14 +197,18 @@ def score(row: dict, trace: dict) -> tuple[float, str]:
 Goal: {goal}
 Criteria: {criteria}
 
-Expects each dataset row to have a `required_keywords` field: a list of
-strings that must all appear (case-insensitive) in the final output. Edit
-the keyword source / matching rule below before approving.
+Expects each dataset row to have a keywords field (named by
+REQUIRED_KEYWORDS_FIELD below -- edit this if your dataset's column isn't
+literally called "required_keywords"): a list of strings that must all
+appear (case-insensitive) in the final output. Edit the keyword source /
+matching rule below before approving.
 """
+
+REQUIRED_KEYWORDS_FIELD = "required_keywords"  # edit to your dataset's actual column name
 
 
 def score(row: dict, trace: dict) -> tuple[float, str]:
-    required = [str(k).lower() for k in row.get("required_keywords", [])]
+    required = [str(k).lower() for k in row.get(REQUIRED_KEYWORDS_FIELD, [])]
     output_lower = str(trace["final_output"]).lower()
 
     if not required:
@@ -225,13 +292,15 @@ default -- tune FN_PENALTY / FP_PENALTY below to match your real tradeoff
 (lower FN_PENALTY = push harder for recall; raise FP_PENALTY = push harder
 for precision).
 
-Expects each dataset row to have a `label` field with POSITIVE_LABEL or
-the negative class. `classify()` is exposed separately (not just inlined in
-score()) so the reporting layer can call it after optimization to compute
-the REAL recall/precision/F1 the winning prompt achieves -- see
-metrics.classification_report() and runner.py.
+Expects each dataset row to have a label field (named by LABEL_FIELD below
+-- edit this if your dataset's column isn't literally called "label") with
+POSITIVE_LABEL or the negative class. `classify()` is exposed separately
+(not just inlined in score()) so the reporting layer can call it after
+optimization to compute the REAL recall/precision/F1 the winning prompt
+achieves -- see metrics.classification_report() and runner.py.
 """
 
+LABEL_FIELD = "label"  # edit to your dataset's actual column name, e.g. "verdict"
 POSITIVE_LABEL = "HALLUCINATED"  # edit to your actual positive-class label
 FN_PENALTY = 0.0   # score when a real positive is missed (false negative)
 FP_PENALTY = 0.4   # score when a real negative is wrongly flagged (false positive)
@@ -255,7 +324,7 @@ def classify(row: dict, trace: dict) -> str:
 
 
 def score(row: dict, trace: dict) -> tuple[float, str]:
-    expected = row["label"].strip().upper()
+    expected = row[LABEL_FIELD].strip().upper()
     predicted = classify(row, trace)
 
     if predicted == expected:

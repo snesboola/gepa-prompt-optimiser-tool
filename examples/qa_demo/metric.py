@@ -3,9 +3,11 @@ Demonstrates that feedback should explain *why*, not just report pass/fail --
 that's what the reflection step actually reads.
 """
 
+REFERENCE_FIELD = "reference"  # matches dataset.jsonl's column name
+
 
 def score(row: dict, trace: dict) -> tuple[float, str]:
-    expected = str(row.get("reference", "")).strip().lower()
+    expected = str(row.get(REFERENCE_FIELD, "")).strip().lower()
     actual = str(trace["final_output"]).strip().lower()
 
     if expected in actual:

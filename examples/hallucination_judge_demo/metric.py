@@ -9,6 +9,7 @@ optimization -- see metrics.classification_report() / runner.py, and the
 "Real recall / precision" section this produces in report.md.
 """
 
+LABEL_FIELD = "label"  # matches dataset.jsonl's column name; rename both together if it changes
 POSITIVE_LABEL = "HALLUCINATED"
 FN_PENALTY = 0.0  # missed a real hallucination -- the costlier mistake for this task
 FP_PENALTY = 0.4  # false alarm on a grounded answer -- still bad, but softer
@@ -29,7 +30,7 @@ def classify(row: dict, trace: dict) -> str:
 
 
 def score(row: dict, trace: dict) -> tuple[float, str]:
-    expected = row["label"].strip().upper()
+    expected = row[LABEL_FIELD].strip().upper()
     predicted = classify(row, trace)
 
     if predicted == expected:

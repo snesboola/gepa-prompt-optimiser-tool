@@ -35,6 +35,7 @@ def build_report(
     run_dir: str | Path,
     config_summary: dict,
     classification_stats: dict | None = None,
+    held_out_stats: dict | None = None,
 ) -> str:
     run_dir = Path(run_dir)
     seed_candidate = result.candidates[0]
@@ -77,12 +78,14 @@ def build_report(
     if classification_stats is not None:
         seed_stats = classification_stats.get("seed")
         best_stats = classification_stats.get("best")
+        evaluated_on = classification_stats.get("evaluated_on", "val")
+        set_label = "held-out test set (never seen during search)" if evaluated_on == "test" else "validation set"
         lines.append("## Real recall / precision (not the per-example proxy score)\n")
         lines.append(
-            "GEPA optimized against a per-example proxy score (asymmetric penalties for "
-            "false negatives vs. false positives) because recall/precision can't be computed "
-            "from a single example. These are the real, aggregate confusion-matrix numbers for "
-            "the seed vs. the winning prompt, on the validation set:\n"
+            "GEPA optimized against a per-example proxy (either asymmetric FN/FP penalties, or "
+            "the recall_proxy/precision_proxy objectives tracked via GEPA's own multi-objective "
+            "Pareto frontier below) because recall/precision can't be computed from a single "
+            f"example. These are the real, aggregate confusion-matrix numbers, on the {set_label}:\n"
         )
         lines.append("| | Seed | Best |")
         lines.append("|---|---|---|")
@@ -97,12 +100,32 @@ def build_report(
                 f"(positive class: `{best_stats['positive_label']}`)\n"
             )
 
+    if held_out_stats is not None:
+        seed_ho = held_out_stats.get("seed", {})
+        best_ho = held_out_stats.get("best", {})
+        lines.append("## Held-out test performance\n")
+        lines.append(
+            f"Mean score on {best_ho.get('n', '?')} rows GEPA never saw during search (not "
+            "trainset, not valset) -- the actual check against overfitting to the validation set:\n"
+        )
+        lines.append("| | Seed | Best |")
+        lines.append("|---|---|---|")
+        lines.append(
+            f"| Mean score | {seed_ho.get('mean_score', 0):.4f} | {best_ho.get('mean_score', 0):.4f} |"
+        )
+        lines.append("")
+
     frontier = result.per_val_instance_best_candidates
     lines.append("## Pareto frontier\n")
     lines.append(
         f"{len(set().union(*frontier.values()) if frontier else set())} distinct candidate(s) "
         f"are best-on-at-least-one validation example across {len(frontier)} example(s)."
     )
+    if result.objective_pareto_front:
+        lines.append("\nPer-objective frontier (GEPA's native multi-objective tracking):\n")
+        for obj_name, obj_score in result.objective_pareto_front.items():
+            n_best = len((result.per_objective_best_candidates or {}).get(obj_name, []))
+            lines.append(f"- `{obj_name}`: best aggregate = {obj_score:.4f}, {n_best} candidate(s) tied for best")
     lines.append("")
 
     lines.append("## Cached run data\n")
@@ -118,6 +141,8 @@ def build_report(
         lines.append(f"- Per-iteration traces/components: `{run_dir / 'iterations'}/`")
     if (run_dir / "classification_report.json").exists():
         lines.append(f"- Full recall/precision/F1 breakdown (seed vs. best): `{run_dir / 'classification_report.json'}`")
+    if (run_dir / "held_out_test.json").exists():
+        lines.append(f"- Held-out test scores (seed vs. best): `{run_dir / 'held_out_test.json'}`")
 
     return "\n".join(lines)
 
@@ -127,8 +152,13 @@ def write_report(
     run_dir: str | Path,
     config_summary: dict,
     classification_stats: dict | None = None,
+    held_out_stats: dict | None = None,
 ) -> Path:
     run_dir = Path(run_dir)
     report_path = run_dir / "report.md"
-    report_path.write_text(build_report(result, run_dir, config_summary, classification_stats=classification_stats))
+    report_path.write_text(
+        build_report(
+            result, run_dir, config_summary, classification_stats=classification_stats, held_out_stats=held_out_stats
+        )
+    )
     return report_path

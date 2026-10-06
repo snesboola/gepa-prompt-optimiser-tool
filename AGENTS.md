@@ -78,6 +78,26 @@ architecture for all three:
   This doesn't change the mean-vs-ratio math above (the per-row proxy is
   still a proxy, not literal recall/precision), it just removes the sampling
   noise on top of it for small datasets.
+
+  **Beyond the asymmetric-penalty proxy**: when a metric exposes `classify`
+  + `POSITIVE_LABEL`, `runner.py` now also uses GEPA's *native*
+  multi-objective Pareto tracking (`EvaluationBatch.objective_scores`,
+  `frontier_type="hybrid"`) via `metrics.recall_precision_objective_scores()`
+  -- a `recall_proxy` (0.0 only on a false negative) and `precision_proxy`
+  (0.0 only on a false positive) tracked as two *separate* frontier
+  dimensions, instead of collapsing the tradeoff into one hand-weighted
+  scalar. `recall_proxy` is provably sound for a fixed valset: since the
+  count of positive-labeled rows is fixed across candidates, mean(recall_proxy)
+  is an exact affine transform of real recall (same engine aggregation GEPA
+  always uses -- a plain mean, confirmed by reading
+  `gepa.core.state.GEPAState._aggregate_objective_scores`). `precision_proxy`
+  is a reasonable heuristic, not an exact proxy (TP varies per candidate too,
+  unlike N_pos for recall) -- `classification_report()` remains the source
+  of truth either way. Verified against the real engine, not just our own
+  adapter code: a tiny fake-LM run with `frontier_type="hybrid"` produced
+  `objective_pareto_front={'recall_proxy': 0.5, 'precision_proxy': 1.0}`
+  matching the hand-derived math exactly, and the acceptance logic still
+  worked correctly with objective_scores present.
 - **Open-ended writing/creative tasks** — no single correct output exists;
   metric is `llm_judge`, scoring against stated criteria via a separate
   `judge_lm` call. Verified working end-to-end (fake task/judge LMs, no API
@@ -98,6 +118,93 @@ architecture for all three:
   genuinely overrides the judge, not just averages with it; a present-phrase
   output then correctly gets judged low for generic filler (0.2) vs. high
   for real specific detail (0.9).
+
+## Engine robustness improvements
+
+- **Dataset structure is actually inspected, not assumed -- and the
+  scaffolded templates are genuinely renameable, not just in theory.**
+  Two real gaps, caught by the user asking "is this generalisable though?
+  what if the column isn't called label": (1) nothing looked at the
+  dataset's actual columns before scaffolding a metric, so a mismatched
+  field name (e.g. a dataset with `verdict` instead of `label`) would only
+  surface as a confusing `KeyError` (or a silently-always-empty `.get()`
+  fallback) once a run was already underway; (2) the `classification`
+  template's scaffold hardcoded `row["label"]` directly in `score()` even
+  though `runner.py` already looked for an optional `LABEL_FIELD`
+  override -- so even defining `LABEL_FIELD = "verdict"` wouldn't have
+  done anything, the function body never read it. Fixed both: `dataset.
+  inspect_dataset()` reports every column's distinct-value count and flags
+  likely-categorical ones (a real, if imperfect, heuristic -- verified it
+  both correctly flags a true 2-value label column and produces a known,
+  documented false positive on a column that merely happens to repeat);
+  a new `gepa-opt inspect-dataset` command surfaces this directly; `gepa-
+  opt suggest-metric` now checks the chosen template's expected field(s)
+  against the real columns *before* scaffolding, and when they don't
+  match, suggests the actual likely-categorical column(s) by name instead
+  of just flagging the absence. `classification`/`exact_match`/
+  `keyword_presence` templates all now define their field name as a real,
+  used top-level constant (`LABEL_FIELD`, `REFERENCE_FIELD`,
+  `REQUIRED_KEYWORDS_FIELD`) that `score()` actually reads, not a hardcoded
+  string literal -- renaming is a one-line edit, verified by scaffolding
+  and compiling all three.
+
+  **Deliberately not automatic.** The follow-up question ("i want the
+  skill/coding harness do these kind of data discovery as it is more
+  generalisable") pushed this further and correctly: a fixed distinct-
+  value-count threshold has no semantic understanding of what a column
+  *means* -- it can't tell "verdict" or "is_fraud" or "ground_truth" is a
+  label column from its name, and it's already a known false positive
+  generator (flags any small-enough repeated column, like a context
+  passage that happens to repeat in a tiny demo dataset, as "categorical").
+  An LLM agent reading the same sample rows and column names can use
+  actual judgment an arithmetic threshold can't. So `inspect_dataset()`'s
+  heuristic is deliberately kept as a weak, cheap fallback signal (useful
+  when no agent is driving, or as a sanity-check even when one is), not
+  the primary mechanism -- the skill (Phase 3, step 1 and step 3) now says
+  explicitly that the agent's own reading of `inspect-dataset`'s output is
+  what should decide `LABEL_FIELD`/`REFERENCE_FIELD`/etc., and that
+  `suggest-metric`'s warning is a safety net for catching an unedited
+  scaffold, not a substitute for actually having looked.
+
+- **Loud failure detection.** A broken `task_lm` call (we hit five
+  different ones in one session -- missing deps, a deprecated model, a
+  missing adapter attribute) used to get silently folded into a `0.0`
+  score by `adapter.evaluate()`'s per-example try/except, indistinguishable
+  from "the prompt is just bad." If *every* row in a batch raises a real
+  exception (not just scores low), `evaluate()` now raises `RuntimeError`
+  naming the first error -- this is the sanctioned case to raise in per
+  `GEPAAdapter`'s own contract ("reserved for unrecoverable, systemic
+  failures"), and `gepa.optimize()`'s `raise_on_exception` (default `True`)
+  governs what happens from there. A partial failure (some rows, not all)
+  still doesn't raise -- that's a legitimately mixed result, not a
+  systemic break. Covered by `tests/test_workflow.py`.
+
+- **Held-out test split.** `trainset`/`valset` alone has the same
+  overfitting risk as a model tuned only against a validation set with no
+  separate test set -- GEPA searches against valset, so a prompt could
+  overfit to it. `dataset.split_dataset()` now optionally carves out a
+  third split (`test_fraction` in `gepa.config.yaml`, default `0.0` =
+  off -- opt-in since a 3-way split of an already-small dataset leaves too
+  little per split to mean anything) that GEPA never sees during search.
+  `runner.py` evaluates seed vs. best on it after optimization and reports
+  the real, unbiased mean score in `report.md`'s "Held-out test
+  performance" section; when a classification metric is in play, the real
+  recall/precision/F1 section also prefers this split over valset when
+  available (more rigorous). Verified end-to-end via `run_optimization()`
+  with fake LMs on a 20-row synthetic dataset.
+
+- **Parallel per-batch evaluation.** `adapter.evaluate()` used to loop over
+  a batch's rows sequentially, one task_lm call at a time, even though the
+  actual bottleneck is network latency, not CPU. `max_workers` in
+  `gepa.config.yaml` (default `1`, sequential) runs a batch's rows
+  concurrently via `ThreadPoolExecutor` when raised. Default stays `1`
+  deliberately: this session hit real Gemini free-tier `429` quota errors
+  from sequential calls alone (see the bug log below) -- firing several
+  requests at once by default would make that worse, not better. Raise it
+  once you know your provider's rate limits can take it (a paid tier, a
+  higher-limit provider, or a local model). Order of outputs/scores/
+  trajectories is preserved regardless of worker count (`tests/
+  test_workflow.py::test_adapter_parallel_execution_preserves_order_and_correctness`).
 
 ## Decisions made since, and why
 

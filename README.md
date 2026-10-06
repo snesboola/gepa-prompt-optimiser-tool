@@ -111,6 +111,10 @@ gepa-opt report
   looks stuck or you want to see exactly what happened)
 - `gepa_state.bin` — `gepa`'s own pickled run state (lets a future version
   resume); not human-readable, `result.json` is the readable equivalent
+- `classification_report.json` / `held_out_test.json` — only written when
+  applicable (a `classification`-style metric, or `test_fraction > 0`); the
+  real recall/precision/F1 and held-out mean score for seed vs. best, also
+  summarized in `report.md`
 
 ## Worked example: optimizing a hallucination-detection judge
 
@@ -352,6 +356,9 @@ not just the "how."
 | `WorkflowGEPAAdapter.make_reflective_dataset()` | turns traces into the feedback the reflection LM reads |
 | `reflection_lm` in `gepa.config.yaml` | the LM that reads failures and proposes a better prompt |
 | `reflection_minibatch_size` in `gepa.config.yaml` | how many rows each reflection step sees — auto-set to the whole training set for ≤25 rows (no noisy 3-row sampling), overridable |
+| `frontier_type="hybrid"` + `EvaluationBatch.objective_scores` | for `classification`-style metrics: a *separate* Pareto frontier per objective (`recall_proxy`, `precision_proxy`), not one hand-weighted scalar — set automatically, not user-configured |
+| `test_fraction` in `gepa.config.yaml` | opt-in held-out split (default off) GEPA never searches against, for a seed-vs-best sanity check against overfitting to valset |
+| `max_workers` in `gepa.config.yaml` | rows within one evaluation batch run concurrently above 1 — default 1 (sequential) to avoid worsening provider rate limits |
 | `run_dir` + our own `result.json`/`report.md` dump | every candidate, score, and lineage, kept on disk |
 
 ## Development

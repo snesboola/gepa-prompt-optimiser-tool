@@ -7,7 +7,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from .config import DEFAULT_CONFIG_NAME, ProjectConfig
-from .metrics import TEMPLATES, scaffold_metric
+from .dataset import inspect_dataset, load_dataset
+from .metrics import TEMPLATE_EXPECTED_FIELDS, TEMPLATES, scaffold_metric
 
 WORKFLOW_TEMPLATE = """\
 # Generic workflow spec optimized by gepa-optimizer.
@@ -58,6 +59,21 @@ def cmd_init(args: argparse.Namespace) -> None:
     print("Next: gepa-opt suggest-metric --type <exact_match|keyword_presence|llm_judge>")
 
 
+def cmd_inspect_dataset(args: argparse.Namespace) -> None:
+    project_root = Path(args.path)
+    config = ProjectConfig.load(project_root / DEFAULT_CONFIG_NAME)
+    rows = load_dataset(project_root / config.dataset)
+    info = inspect_dataset(rows)
+
+    print(f"{info['n_rows']} row(s), columns: {info['columns']}\n")
+    for col, stats in info["column_stats"].items():
+        tag = " <- likely categorical (label/verdict/category?)" if stats["likely_categorical"] else ""
+        print(f"  {col}: {stats['n_distinct']} distinct value(s), e.g. {stats['examples']}{tag}")
+    print("\nSample row(s):")
+    for row in info["sample"]:
+        print(f"  {row}")
+
+
 def cmd_suggest_metric(args: argparse.Namespace) -> None:
     project_root = Path(args.path)
     config = ProjectConfig.load(project_root / DEFAULT_CONFIG_NAME)
@@ -72,6 +88,34 @@ def cmd_suggest_metric(args: argparse.Namespace) -> None:
     if out_path.exists() and not args.force:
         print(f"{out_path} already exists. Use --force to overwrite.", file=sys.stderr)
         sys.exit(1)
+
+    # Check the chosen template's assumed field names against what the real
+    # dataset actually has, *before* scaffolding -- a silent mismatch here
+    # means a KeyError (or worse, a quietly-always-empty fallback) later,
+    # not when it's cheap to catch.
+    try:
+        rows = load_dataset(project_root / config.dataset)
+        info = inspect_dataset(rows)
+        print(f"Dataset columns: {info['columns']}")
+        missing = [f for f in TEMPLATE_EXPECTED_FIELDS.get(args.type, []) if f not in info["columns"]]
+        if missing:
+            candidates = [
+                col for col, stats in info["column_stats"].items() if stats["likely_categorical"]
+            ]
+            suggestion = (
+                f" Column(s) that look like they might be it (few distinct values): {candidates} -- "
+                f"consider setting LABEL_FIELD (or the equivalent constant) to one of those in metric.py."
+                if candidates
+                else " No column looked like an obvious candidate (checked for low-distinct-value columns) -- "
+                "double check your dataset actually has the field this template needs."
+            )
+            print(
+                f"WARNING: the {args.type!r} template's scaffold expects a {missing} field, "
+                f"but your dataset's columns are {info['columns']} -- none match.{suggestion}",
+                file=sys.stderr,
+            )
+    except FileNotFoundError:
+        pass  # dataset not written yet (e.g. mid-scaffolding a brand-new project) -- nothing to check against
 
     scaffold_metric(args.type, goal, criteria, out_path)
 
@@ -122,6 +166,9 @@ def main(argv: list[str] | None = None) -> None:
     p_init.add_argument("--criteria", help="Specific criteria the output must meet")
     p_init.add_argument("--force", action="store_true")
     p_init.set_defaults(func=cmd_init)
+
+    p_inspect = sub.add_parser("inspect-dataset", help="Show the dataset's real columns, value samples, and sample rows")
+    p_inspect.set_defaults(func=cmd_inspect_dataset)
 
     p_metric = sub.add_parser("suggest-metric", help="Scaffold a scoring function for review/approval")
     p_metric.add_argument("--type", default="exact_match", choices=list(TEMPLATES))
