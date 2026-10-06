@@ -267,8 +267,8 @@ custom internal harness, or just you in a terminal.
 
 1. **Get the code there.** Clone this repo wherever you're working. If that
    environment can't reach GitHub, `reference/gepa-ai-gepa` (a submodule
-   pointing at a public fork, kept purely for citation) can be dropped —
-   nothing in the package imports from it.
+   pointing at the upstream library, kept purely for citation) can be
+   dropped — nothing in the package imports from it.
 
 2. **Install it** (`>=3.10`, per `gepa`'s own requirement):
    ```bash

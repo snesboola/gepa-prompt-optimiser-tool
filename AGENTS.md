@@ -69,8 +69,8 @@ direct answer to a constraint that showed up along the way:
   reimplementation.** It already has the real Pareto-frontier logic, budget
   management, and a clean adapter contract (`GEPAAdapter.evaluate` +
   `make_reflective_dataset`). `reference/gepa-ai-gepa` is a pinned submodule
-  of this (via a fork) for citation/reproducibility — read for reference,
-  never built on top of or copied from.
+  of this, pointing directly at upstream, for citation/reproducibility —
+  read for reference, never built on top of or copied from.
 
 - **Generic workflow backend now; Dify (or any other platform) is a
   pluggable seam, not baked in.** `workflow.yaml` + `WorkflowRunner`
