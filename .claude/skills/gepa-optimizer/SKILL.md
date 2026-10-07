@@ -40,7 +40,12 @@ The user has (or will point you at) a project folder containing:
   existing `workflow.yaml`, or something else — e.g. a Dify export — that
   you'll help translate; see "Non-native workflow sources" below).
 
-If the folder has no `gepa.config.yaml` yet, this is a new project.
+If the folder has no `gepa.config.yaml` yet, this is a new project. If one
+*does* exist, don't assume where things stand — run `gepa-opt status`
+first (works at any point in the journey) to see what's wired up, what's
+still a default placeholder, and whether a run has already happened, so
+you pick up where things actually are instead of re-deriving it from
+scratch or re-asking things already settled.
 
 ## Phase 0 — Understand the whole workflow first
 
@@ -138,7 +143,7 @@ variable names, the target itself, and (if relevant to scoring) a
 downstream node that shows what format its output actually needs to be in.
 Tell the user plainly that this runs the prompt logic standalone (direct
 LLM calls), not inside their actual platform runtime (no tools/retrieval/
-side-effects from other nodes) — see `docs/adapters.md` if they want the
+side-effects from other nodes) — see `dev/docs/adapters.md` if they want the
 real thing wired up instead of this translation.
 
 ## Phase 3 — Propose a scoring function, then stop for approval
@@ -156,7 +161,7 @@ seen.
    that heuristic as a weak hint, not an answer — it has no idea what a
    column *means*, only how many distinct values it happens to have, and
    it's already known to misfire (it flagged a repeated context passage as
-   "likely categorical" in `examples/hallucination_judge_demo` just
+   "likely categorical" in `dev/examples/hallucination_judge_demo` just
    because the demo dataset was small enough that a few context strings
    repeated). You're the one who should actually read the column names and
    sample values and reason about which one is the label/reference/
@@ -214,9 +219,20 @@ seen.
 4. Make sure the feedback strings are specific (what was expected, what was
    produced, which rule it violated) — vague feedback produces vague
    mutations; this is the single biggest lever on optimization quality.
-5. Show the user the metric (or a summary of its logic) and ask for explicit
-   approval or changes before proceeding. If they ask for changes, edit and
-   re-confirm.
+5. Show the user the metric **and** translate it back into plain English
+   before asking for approval — 2–3 sentences covering what counts as a
+   pass, what counts as a hard fail regardless of anything else, and how
+   the two kinds of mistake (if any) are weighted differently. Asking
+   someone to "approve" a Python function is only a real approval if they
+   actually understood what it checks; showing the code alone and asking
+   "does this look right?" isn't that, even for a technical user skimming
+   fast. For example: *"This gives full credit only if the output is
+   exactly GROUNDED or HALLUCINATED. Missing a real hallucination scores
+   zero; a false alarm on a grounded answer scores partial credit (0.4) —
+   so it'll push harder to catch real hallucinations than to avoid false
+   alarms. Does that match what you want?"* Ask for explicit approval or
+   changes. If they ask for changes, edit and re-confirm — including the
+   plain-English summary again, since the thing they're approving changed.
 
 ## Phase 4 — Run it
 
@@ -233,8 +249,21 @@ fix the problem (missing dependency, wrong field name, bad `judge_lm`
 wiring) and re-validate before going further — don't proceed to a real run
 on a known-broken metric.
 
-Then tell the user you're starting the real run, with the budget and a
-rough sense of cost/time, and run it:
+Next, get a rough estimate and tell the user what they're actually
+committing to before they commit to it — don't just say "this might take a
+while":
+
+```bash
+gepa-opt estimate --max-metric-calls <budget>
+```
+
+This prints a rough LM-call count and a time range (explicitly a rough
+structural estimate, not a guarantee or a real dollar cost — it doesn't
+call out to any pricing data). Relay it plainly: "~N calls, roughly M–M'
+minutes" is enough for the user to make an informed call on the budget
+before anything real starts.
+
+Then run it:
 
 ```bash
 gepa-opt optimize --max-metric-calls <budget>
@@ -242,15 +271,17 @@ gepa-opt optimize --max-metric-calls <budget>
 
 Default budget (150) is reasonable for a first run on a small-to-medium
 dataset; scale down for a quick smoke test (e.g. 20-30) or up if the user
-wants a thorough search. Mention the budget/cost tradeoff to the user before
-running anything large. Requires `ANTHROPIC_API_KEY` (or whatever provider
+wants a thorough search. Requires `ANTHROPIC_API_KEY` (or whatever provider
 `task_lm`/`reflection_lm` in `gepa.config.yaml` need) to be set — check for it
 and ask if missing, don't just fail silently into a wall of tracebacks.
-Once it's running, let the user know it's underway (this can take a few
-minutes) rather than going silent until it's completely done — a brief
-"optimization is running now, N candidates explored so far" if you're
-checking in partway through is better than nothing. Confirm clearly when
-it finishes, before moving to Phase 5.
+
+While it's running, `run_dir/progress.log` gets one clean, regular line
+per iteration (metric calls used so far, candidates found, best score) —
+tail or periodically re-read that file and relay a short update ("iteration
+3, 40/150 calls used, best score 0.82 so far") rather than going silent
+until it's completely done; don't rely on eyeballing the verbose
+`run_log.txt` for this, `progress.log` is the one meant for exactly this.
+Confirm clearly when it finishes, before moving to Phase 5.
 
 If `runs/latest/gepa_state.bin` already exists from a previous run,
 `gepa-opt optimize` refuses and asks you to choose explicitly: `--resume`
@@ -304,6 +335,14 @@ Everything lives under `runs/latest/` (per `run_dir` in config):
 - `result.json` — every candidate tried, with lineage and scores, as raw
   JSON (`report.md`'s "All candidates tried" is the readable version of
   this).
+- `report.html` — the exact same report as `report.md`, as a self-contained
+  styled HTML page (no external dependencies, no network calls). This is
+  the portable version of "publish a nicer page than a wall of chat
+  markdown" — it's generated by the plain `gepa_optimizer` package itself
+  (`report.py`), so *any* harness produces it just by running `optimize`,
+  not only one with access to a specific publishing tool. Point the user
+  at this file to open in a browser as the default "nicer delivery"
+  option.
 - `candidate_tree.html` — interactive lineage view; hovering a node shows
   its full prompt text.
 
@@ -319,10 +358,12 @@ Give the user:
    didn't win — point specifically at the "All candidates tried" section,
    since that's the direct answer if they ask to see every approach tried.
 
-If this session has artifact publishing available, consider turning
-`report.md` (plus the lineage tree) into a published summary page rather
-than a wall of markdown in chat — check the relevant skill for how to do
-that well before building one.
+`report.html` already covers "a nicer page than a wall of chat markdown"
+without depending on any harness-specific feature. If this session
+specifically has a publishing tool available (e.g. Claude Code's Artifact
+tool), publishing it for a shareable link is a reasonable extra on top —
+but it's an addition, not the mechanism this depends on; don't build a
+one-off page by hand when `report.html` already exists.
 
 ## Notes for maintainers of this skill
 

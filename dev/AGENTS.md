@@ -262,6 +262,65 @@ architecture for all three:
   rather than erroring -- confirms the wiring is correct and safe even
   when a merge opportunity doesn't happen to exist in a given run.
 
+## User journey improvements
+
+Distinct from the engine-robustness list above: these are about the
+*experience* of going through the five-phase journey, not the correctness
+of what happens underneath it.
+
+- **Plain-English metric summary at the approval gate.** Showing someone
+  Python code and asking "does this look right?" isn't a real approval if
+  they didn't actually parse the logic -- true for a non-coder, often
+  true for a technical user skimming fast too. The skill's Phase 3 now
+  requires a 2-3 sentence plain-language translation alongside the code
+  (what counts as a pass, what's a hard fail regardless of anything else,
+  how the two kinds of mistake are weighted) before asking for approval,
+  with a worked example in the skill text itself.
+
+- **Regular progress logging, via GEPA's own callback mechanism.**
+  `run_log.txt` is comprehensive but low-level (raw provider errors,
+  every retry) -- not something to relay live without translation.
+  `ProgressLogger` (`runner.py`) is a `GEPACallback` (duck-typed Protocol,
+  confirmed via `notify_callbacks()`'s `getattr(callback, method, None)`
+  pattern in the real engine -- implementing only `on_optimization_start`/
+  `on_iteration_end`/`on_optimization_end` is safe) that writes one clean
+  line per iteration (metric calls used, candidates so far, best score) to
+  both stdout and `run_dir/progress.log`. Verified against the real
+  engine: correct values at each iteration, including a final summary
+  line from `on_optimization_end`.
+
+- **A portable HTML report, not a Claude-Code-specific artifact.** Asked
+  directly: can another coding harness produce the "nicer page" version
+  of the results? Only if it doesn't depend on a specific harness's
+  publishing tool. `report.html` (`report.py`) is a self-contained,
+  dependency-free static HTML file -- written by `write_report()` as
+  routinely as `candidate_tree.html` already is, so *any* harness gets it
+  for free just by running `optimize`. Deliberately built as a narrow
+  markdown-to-HTML transform over `build_report()`'s own output (not a
+  second, parallel implementation of the report's content/structure
+  logic) specifically to avoid two sources of truth that could drift
+  apart -- it only ever needs to understand the small, fixed set of
+  constructs `build_report()` actually emits (headers, bold, strikethrough,
+  inline code, fenced code blocks, pipe tables, literal `<details>`
+  passthrough), not general markdown. Verified: real special characters
+  (quotes, `&`, `<tags>`) in a real goal string escape correctly rather
+  than being interpreted as markup; `tests/test_report_html.py` covers the
+  converter directly, `tests/test_report.py` covers the underlying diff
+  helper it reuses.
+
+- **`gepa-opt status` and `gepa-opt estimate`.** Two different gaps:
+  `status` is read-only, zero-cost project introspection (config present?
+  workflow actually edited or still the default scaffold? metric still
+  has unedited `TODO`/`OTHER_LABEL` markers? has a run completed, with
+  what score?) -- for re-orienting after a break without re-reading
+  everything from scratch. `estimate` is a rough, pre-run LM-call-count
+  and time-range estimate (pure arithmetic over budget/dataset shape, no
+  network calls, no pricing database to keep in sync with live rates --
+  deliberately not a dollar figure, since that would overclaim precision
+  it can't actually have), meant to be shown to the user *before* they
+  commit to a real `optimize` run, not just a budget/cost mention in
+  passing.
+
 ## Decisions made since, and why
 
 These came out of the vision as the architecture got built, each one a
@@ -270,9 +329,9 @@ direct answer to a constraint that showed up along the way:
 - **Build a real, portable engine, not a Claude-Code-only trick.** The user
   will migrate this to a company environment that uses an internal harness,
   not Claude Code. So the actual optimizer is a standalone Python
-  package/CLI (`src/gepa_optimizer/`, the `gepa-opt` command) with zero
+  package/CLI (`../src/gepa_optimizer/`, the `gepa-opt` command) with zero
   dependency on any particular coding agent's tool-use loop. A conversational
-  layer on top (`.claude/skills/gepa-optimizer/SKILL.md`) makes the journey
+  layer on top (`../.claude/skills/gepa-optimizer/SKILL.md`) makes the journey
   feel guided in Claude Code today; porting the *journey* to another harness
   later means rewriting that one instructions file in whatever format that
   harness uses, the engine underneath doesn't change.
@@ -286,7 +345,7 @@ direct answer to a constraint that showed up along the way:
 
 - **Generic workflow backend now; Dify (or any other platform) is a
   pluggable seam, not baked in.** `workflow.yaml` + `WorkflowRunner`
-  (`src/gepa_optimizer/workflow.py`) is the default, platform-agnostic
+  (`../src/gepa_optimizer/workflow.py`) is the default, platform-agnostic
   backend — a small chain of LLM-call nodes, run with direct task-LM calls.
   Swapping in a real platform (Dify, LangGraph, an internal agent runtime)
   means subclassing `WorkflowRunner`, documented in `docs/adapters.md`.
@@ -294,7 +353,7 @@ direct answer to a constraint that showed up along the way:
   deferred to a separate branch.
 
 - **The LM itself is just as pluggable, for the same portability reason.**
-  `task_lm`/`reflection_lm` resolve (`src/gepa_optimizer/llm.py`) from either
+  `task_lm`/`reflection_lm` resolve (`../src/gepa_optimizer/llm.py`) from either
   a plain litellm model string or a `callable:module:attr` spec. Today that's
   a litellm string pointed at Google AI Studio's free tier (no card
   required, see below). The eventual company-harness version is expected to
@@ -404,13 +463,13 @@ session doesn't rediscover the same gap from scratch:
   (its default `Logger`, since we pass `run_dir` without overriding
   `logger`) -- every iteration, every reflection attempt, retries/errors
   verbatim. This is the thing to tail if a run looks stuck. Now listed in
-  `report.md`'s "Cached run data" section and in `README.md`.
+  `report.md`'s "Cached run data" section and in `../README.md`.
 
 ## Other docs
 
-- `README.md` — how to actually install and run this.
+- `../README.md` — how to actually install and run this.
 - `docs/adapters.md` — how to swap in a real platform backend (Dify, etc.)
   instead of the generic one.
-- `.claude/skills/gepa-optimizer/SKILL.md` — the guided conversational
+- `../.claude/skills/gepa-optimizer/SKILL.md` — the guided conversational
   journey through all five steps above.
 - `reference/README.md` — what's vendored for citation and why.

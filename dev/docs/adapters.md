@@ -1,6 +1,6 @@
 # Writing a platform adapter
 
-This repo's default backend is `WorkflowRunner` (`src/gepa_optimizer/workflow.py`):
+This repo's default backend is `WorkflowRunner` (`../../src/gepa_optimizer/workflow.py`):
 it reads a small YAML graph and calls the task LM directly for every `llm`
 node. That's enough to optimize a standalone prompt, but it is not your real
 production system -- it doesn't call your actual agent platform, tools, or
@@ -33,7 +33,7 @@ class DifyWorkflowRunner(WorkflowRunner):
         ...
 ```
 
-Then point `WorkflowGEPAAdapter` (`src/gepa_optimizer/adapter.py`) at your
+Then point `WorkflowGEPAAdapter` (`../../src/gepa_optimizer/adapter.py`) at your
 runner subclass instead of the default one -- that's the only wiring change.
 
 ## The other portability seam: the reflection/task LM

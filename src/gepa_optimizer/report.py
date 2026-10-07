@@ -7,7 +7,9 @@ runner.run_optimization() right after gepa.optimize() returns).
 from __future__ import annotations
 
 import difflib
+import html
 import json
+import re
 from pathlib import Path
 
 from gepa import GEPAResult
@@ -32,6 +34,143 @@ def word_diff_markdown(old: str, new: str) -> str:
             if new_words[j1:j2]:
                 parts.append(f"**{' '.join(new_words[j1:j2])}**")
     return " ".join(p for p in parts if p)
+
+
+_DETAILS_SUMMARY_RE = re.compile(r"^<details><summary>(.*)</summary>$")
+
+
+def _inline_html(text: str) -> str:
+    """Escape, then apply the small set of inline markers build_report()
+    actually produces -- escaping first is safe since **, ~~, ` aren't
+    touched by html.escape(), and it means any literal HTML-looking text
+    inside a prompt doesn't get interpreted as real markup."""
+    text = html.escape(text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(r"~~(.+?)~~", r"<del>\1</del>", text)
+    text = re.sub(r"`([^`]+?)`", r"<code>\1</code>", text)
+    return text
+
+
+def _render_table_html(rows: list[str]) -> str:
+    def split_row(r: str) -> list[str]:
+        return [c.strip() for c in r.strip().strip("|").split("|")]
+
+    header = split_row(rows[0])
+    data_rows = [split_row(r) for r in rows[2:]] if len(rows) > 2 else []  # rows[1] is the |---|---| separator
+    out = ["<table>", "<tr>" + "".join(f"<th>{_inline_html(h)}</th>" for h in header) + "</tr>"]
+    for r in data_rows:
+        out.append("<tr>" + "".join(f"<td>{_inline_html(c)}</td>" for c in r) + "</tr>")
+    out.append("</table>")
+    return "\n".join(out)
+
+
+def markdown_to_html_body(markdown_text: str) -> str:
+    """Narrow, purpose-built converter for exactly the markdown constructs
+    build_report() produces (headers, **bold**, ~~strike~~, `code`, fenced
+    code blocks, pipe tables, and literal <details><summary>/</details>
+    passthrough) -- not a general markdown parser. Deliberately not a
+    second copy of the report's actual content/structure logic: this only
+    ever transforms build_report()'s already-assembled markdown string, so
+    there's one source of truth for what the report says, not two that can
+    drift apart.
+    """
+    lines = markdown_text.split("\n")
+    out: list[str] = []
+    table_buffer: list[str] = []
+    i = 0
+
+    def flush_table() -> None:
+        if table_buffer:
+            out.append(_render_table_html(table_buffer))
+            table_buffer.clear()
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        if stripped.startswith("```"):
+            flush_table()
+            code_lines = []
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                code_lines.append(lines[i])
+                i += 1
+            i += 1
+            out.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+            continue
+
+        if stripped.startswith("|"):
+            table_buffer.append(stripped)
+            i += 1
+            continue
+        flush_table()
+
+        details_match = _DETAILS_SUMMARY_RE.match(stripped)
+        if details_match:
+            out.append(f"<details><summary>{_inline_html(details_match.group(1))}</summary>")
+        elif stripped in ("</details>",):
+            out.append(stripped)
+        elif stripped.startswith("### "):
+            out.append(f"<h3>{_inline_html(stripped[4:])}</h3>")
+        elif stripped.startswith("## "):
+            out.append(f"<h2>{_inline_html(stripped[3:])}</h2>")
+        elif stripped.startswith("# "):
+            out.append(f"<h1>{_inline_html(stripped[2:])}</h1>")
+        elif stripped == "":
+            pass  # paragraph break -- nothing to emit, blocks are already separate elements
+        else:
+            out.append(f"<p>{_inline_html(stripped)}</p>")
+        i += 1
+
+    flush_table()
+    return "\n".join(out)
+
+
+_HTML_PAGE_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GEPA Optimization Report</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 860px;
+          margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }}
+  h1, h2, h3 {{ margin-top: 2rem; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 1rem 0; }}
+  th, td {{ border: 1px solid #8884; padding: 0.4rem 0.7rem; text-align: left; }}
+  th {{ background: #8881; }}
+  pre {{ background: #8881; padding: 0.8rem; border-radius: 6px; overflow-x: auto; }}
+  code {{ background: #8881; padding: 0.1rem 0.3rem; border-radius: 4px; }}
+  pre code {{ background: none; padding: 0; }}
+  del {{ opacity: 0.6; }}
+  details {{ border: 1px solid #8884; border-radius: 6px; padding: 0.5rem 0.8rem; margin: 0.6rem 0; }}
+  summary {{ cursor: pointer; font-weight: 600; }}
+</style>
+</head>
+<body>
+{body}
+</body>
+</html>
+"""
+
+
+def build_report_html(
+    result: GEPAResult,
+    run_dir: str | Path,
+    config_summary: dict,
+    classification_stats: dict | None = None,
+    held_out_stats: dict | None = None,
+) -> str:
+    """The same report as build_report(), as a self-contained static HTML
+    file -- no external dependencies, no network calls, no dependency on
+    any particular coding agent's publishing mechanism. Any harness can
+    generate this (it's just a file write, like candidate_tree.html
+    already is); opening it just needs a browser.
+    """
+    markdown_text = build_report(
+        result, run_dir, config_summary, classification_stats=classification_stats, held_out_stats=held_out_stats
+    )
+    return _HTML_PAGE_TEMPLATE.format(body=markdown_to_html_body(markdown_text))
 
 
 def best_score(result: GEPAResult) -> float:
@@ -90,7 +229,7 @@ def build_report(
         seed_text = seed_candidate.get(component, "")
         lines.append(f"### `{component}`\n")
         if text == seed_text:
-            lines.append("_Unchanged from seed._\n")
+            lines.append("(Unchanged from seed.)\n")
         else:
             lines.append(f"**What changed:** {word_diff_markdown(seed_text, text)}\n")
             lines.append("<details><summary>Full text (seed vs. evolved)</summary>\n")
@@ -182,11 +321,17 @@ def build_report(
     lines.append("## Cached run data\n")
     lines.append(f"- Full candidate pool + scores: `{run_dir / 'result.json'}`")
     lines.append(f"- Best candidate only: `{run_dir / 'best_candidate.json'}`")
+    lines.append(f"- This same report as a styled, self-contained HTML page: `{run_dir / 'report.html'}`")
     lines.append(f"- Interactive lineage tree: `{run_dir / 'candidate_tree.html'}`")
     if (run_dir / "run_log.txt").exists():
         lines.append(
             f"- Full run log (every iteration, every reflection attempt, retries/errors verbatim): "
             f"`{run_dir / 'run_log.txt'}`"
+        )
+    if (run_dir / "progress.log").exists():
+        lines.append(
+            f"- Short, regular progress line per iteration (metric calls used, best score so far) -- "
+            f"the thing to tail for \"is this still going\": `{run_dir / 'progress.log'}`"
         )
     if (run_dir / "iterations").exists():
         lines.append(f"- Per-iteration traces/components: `{run_dir / 'iterations'}/`")
@@ -206,10 +351,10 @@ def write_report(
     held_out_stats: dict | None = None,
 ) -> Path:
     run_dir = Path(run_dir)
-    report_path = run_dir / "report.md"
-    report_path.write_text(
-        build_report(
-            result, run_dir, config_summary, classification_stats=classification_stats, held_out_stats=held_out_stats
-        )
+    markdown_text = build_report(
+        result, run_dir, config_summary, classification_stats=classification_stats, held_out_stats=held_out_stats
     )
+    report_path = run_dir / "report.md"
+    report_path.write_text(markdown_text)
+    (run_dir / "report.html").write_text(_HTML_PAGE_TEMPLATE.format(body=markdown_to_html_body(markdown_text)))
     return report_path

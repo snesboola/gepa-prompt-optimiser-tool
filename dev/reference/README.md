@@ -10,7 +10,7 @@ Git submodule pointing directly at the official upstream GEPA implementation:
 
 Pinned at commit `fb1ed589fd83372caef499cffc2c73173d3b096b` (2026-10-02).
 
-This is the real engine our `src/gepa_optimizer` package depends on as a pip
+This is the real engine our `../../src/gepa_optimizer` package depends on as a pip
 package (`gepa>=0.1.4`) and whose adapter contract (`GEPAAdapter`,
 `EvaluationBatch`, `reflection_lm`/`task_lm` resolution) our code was written
 against. Kept here, pinned, so the exact source used during development is

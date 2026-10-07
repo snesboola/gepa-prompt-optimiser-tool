@@ -28,3 +28,10 @@ gepa-opt = "gepa_optimizer.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# Without this, a bare `pytest` also walks into dev/reference/gepa-ai-gepa's
+# own test suite (a full separate repo via the pinned submodule) and fails
+# to collect it (different/missing dev dependencies) -- restrict discovery
+# to our own tests.
+testpaths = ["dev/tests"]

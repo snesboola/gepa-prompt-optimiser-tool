@@ -38,8 +38,8 @@ anything: grab a free key at [aistudio.google.com](https://aistudio.google.com/a
 pip install -e .
 export GEMINI_API_KEY=...
 
-gepa-opt --path examples/qa_demo optimize
-gepa-opt --path examples/qa_demo report
+gepa-opt --path dev/examples/qa_demo optimize
+gepa-opt --path dev/examples/qa_demo report
 ```
 
 That runs the bundled example: a one-node workflow answering geography
@@ -48,7 +48,7 @@ questions, scored by whether the reference answer appears in the output.
 To use a different provider instead, change `task_lm`/`reflection_lm` in
 `gepa.config.yaml` to any litellm model string (e.g.
 `anthropic/claude-sonnet-5` with `ANTHROPIC_API_KEY` set) or a
-`callable:module:attr` spec (see [`docs/adapters.md`](docs/adapters.md)).
+`callable:module:attr` spec (see [`dev/docs/adapters.md`](dev/docs/adapters.md)).
 
 ## Starting your own project
 
@@ -66,6 +66,13 @@ This scaffolds:
 | `gepa.config.yaml` | Which files to use, which LMs, how big a budget |
 | `workflow.yaml` | The node(s) to optimize — edit this to match your real prompt(s) |
 | `dataset.jsonl` | Replace with your real rows (JSONL, JSON array, or CSV all work) |
+
+At any point, `gepa-opt status` shows where the project actually stands —
+config present, whether `workflow.yaml` is still the default scaffold or
+actually edited, dataset row count, whether `metric.py` still has
+unedited placeholder markers, and whether a run has already completed
+(with its best score). Useful for picking back up after a break without
+re-deriving all of this from scratch.
 
 Then draft and approve a scoring function:
 
@@ -93,11 +100,18 @@ to fix.
 
 Before running the real thing, a cheap sanity check against a couple of
 real rows — catches a wrong field name, a missing dependency, or a broken
-`task_lm` before it burns real budget:
+`task_lm` before it burns real budget — plus a rough sense of what you're
+actually about to commit to:
 
 ```bash
 gepa-opt validate
+gepa-opt estimate --max-metric-calls 150
 ```
+
+`estimate` is a rough LM-call count and time range from pure arithmetic
+over the budget and dataset shape — not a dollar figure (no pricing data
+involved) and not a guarantee, just enough to decide if the budget feels
+right before anything real starts.
 
 Once that's clean and you're happy with `metric.py`:
 
@@ -111,22 +125,28 @@ asks you to pick explicitly: `--resume` to continue it, or `--fresh` to
 archive it (renamed with a timestamp, not deleted) and start over. This is
 deliberate — `gepa.optimize()` resumes silently by default, which once
 served stale pre-bug-fix results in this project's own history (see
-`AGENTS.md`'s bug log).
+`dev/AGENTS.md`'s bug log).
 
 `optimize` writes everything under `runs/latest/`:
 
 - `result.json` — every candidate tried, its lineage, and its score
 - `best_candidate.json` — just the winner
 - `candidate_tree.html` — an interactive view of how candidates evolved
-- `report.md` — the human-readable summary: score trajectory, a word-level
-  diff of what changed (seed vs. best), and an **"All candidates tried"**
-  section listing every single candidate GEPA explored with a diff from
-  its immediate parent — the direct answer to "can I see every prompt it
-  generated," not just the seed and the winner
+- `report.md` / `report.html` — the same human-readable summary in both
+  forms: score trajectory, a word-level diff of what changed (seed vs.
+  best), and an **"All candidates tried"** section listing every single
+  candidate GEPA explored with a diff from its immediate parent — the
+  direct answer to "can I see every prompt it generated," not just the
+  seed and the winner. `report.html` is a self-contained, dependency-free
+  static page — open it in a browser; it's produced by this package
+  alone, no publishing tool or specific coding harness required.
 - `run_log.txt` / `run_log_stderr.txt` — `gepa`'s own live log: every
   iteration, every reflection attempt, retries and errors verbatim (written
   automatically because `run_dir` is set; this is the thing to tail if a run
   looks stuck or you want to see exactly what happened)
+- `progress.log` — a short, regular line per iteration (metric calls used,
+  candidates found, best score so far) — the thing to tail for "is this
+  still going," without parsing the more verbose `run_log.txt`
 - `gepa_state.bin` — `gepa`'s own pickled run state (lets a future version
   resume); not human-readable, `result.json` is the readable equivalent
 - `classification_report.json` / `held_out_test.json` — only written when
@@ -140,9 +160,9 @@ A full walkthrough, start to finish, using a different shape of problem than
 the QA example above: here the prompt being optimized is itself a **judge**
 — given a source context and a generated answer, it has to say whether the
 answer is actually supported by the context, or hallucinated. This is the
-LLM-as-judge case from [AGENTS.md](AGENTS.md)'s "what kinds of prompts this
+LLM-as-judge case from [dev/AGENTS.md](dev/AGENTS.md)'s "what kinds of prompts this
 optimizes" — scored against *known-correct labels*, not another judge call.
-The finished files live in [`examples/hallucination_judge_demo`](examples/hallucination_judge_demo).
+The finished files live in [`dev/examples/hallucination_judge_demo`](dev/examples/hallucination_judge_demo).
 
 **1. State the goal and scaffold the project:**
 
@@ -239,7 +259,7 @@ gepa-opt report
 ```
 
 **What actually happens**, verified against the logic above with stand-in
-judges (no API calls — see `AGENTS.md`'s bug log for why a live run is
+judges (no API calls — see `dev/AGENTS.md`'s bug log for why a live run is
 pending a Gemini free-tier quota reset as of this writing): the seed prompt
 ("Decide whether the ANSWER is fully supported by the CONTEXT") leaves the
 output format open, so a judge that hedges ("the answer seems *mostly*
@@ -299,7 +319,7 @@ fields and every earlier node's output are both available as `$name`.
 The default `WorkflowRunner` just calls the task LM directly for every node —
 fine for optimizing a standalone prompt, but it isn't your production system
 (no tools, no retrieval, no real orchestration). See
-[`docs/adapters.md`](docs/adapters.md) for how to swap in a runner that
+[`dev/docs/adapters.md`](dev/docs/adapters.md) for how to swap in a runner that
 actually executes your platform (Dify, LangGraph, an internal agent runtime)
 per candidate, and how to point the reflection/task LM at something other
 than a direct provider API key (e.g. an internal gateway that only exposes a
@@ -315,7 +335,7 @@ Markdown playbook can drive the whole thing — a different coding agent, a
 custom internal harness, or just you in a terminal.
 
 1. **Get the code there.** Clone this repo wherever you're working. If that
-   environment can't reach GitHub, `reference/gepa-ai-gepa` (a submodule
+   environment can't reach GitHub, `dev/reference/gepa-ai-gepa` (a submodule
    pointing at the upstream library, kept purely for citation) can be
    dropped — nothing in the package imports from it.
 
@@ -332,7 +352,7 @@ custom internal harness, or just you in a terminal.
    that can be pointed at a Markdown file and told "follow these
    instructions" can use the exact same file — the phases, the approval
    gate, and the CLI commands it calls don't reference Claude Code
-   anywhere. `AGENTS.md` is the harness-agnostic summary of the same intent,
+   anywhere. `dev/AGENTS.md` is the harness-agnostic summary of the same intent,
    for a harness (or a person) that just wants the "why" without the
    step-by-step playbook.
 
@@ -341,7 +361,7 @@ custom internal harness, or just you in a terminal.
    sanctioned path to a model is through something else entirely — an
    internal gateway, a workflow platform that takes a system prompt + user
    prompt and returns text — write one function matching
-   `Callable[[str | list[dict]], str]` (see [`docs/adapters.md`](docs/adapters.md)
+   `Callable[[str | list[dict]], str]` (see [`dev/docs/adapters.md`](dev/docs/adapters.md)
    for a worked example) and point config at it:
    ```yaml
    task_lm: "callable:my_client:my_llm_call"
@@ -352,7 +372,7 @@ custom internal harness, or just you in a terminal.
 
 5. **If you want it to execute your real platform, not just a bare LLM
    call**, subclass `WorkflowRunner` and override `run()`/`call_llm()` to
-   actually invoke that platform per candidate (`docs/adapters.md` has the
+   actually invoke that platform per candidate (`dev/docs/adapters.md` has the
    pattern). Skip this if optimizing the prompt text in isolation is good
    enough — most of the time it is.
 
@@ -360,7 +380,7 @@ custom internal harness, or just you in a terminal.
    this: `gepa-opt init` / `suggest-metric` / `optimize` / `report`, the
    same `gepa.config.yaml` shape, the same `run_dir` artifacts.
 
-See [`AGENTS.md`](AGENTS.md) for the full reasoning behind this split
+See [`dev/AGENTS.md`](dev/AGENTS.md) for the full reasoning behind this split
 (why a real upstream library instead of a toy reimplementation, why the
 LM and workflow backends are both pluggable seams) if you want the "why,"
 not just the "how."
@@ -387,7 +407,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-`tests/test_workflow.py` exercises the node-chaining and adapter logic
+`dev/tests/test_workflow.py` exercises the node-chaining and adapter logic
 directly (no API keys / network needed — it uses a fake task LM).
 
 ## License

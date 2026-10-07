@@ -25,6 +25,54 @@ from .workflow import WorkflowSpec
 SMALL_DATASET_THRESHOLD = 25
 
 
+class ProgressLogger:
+    """A GEPACallback (duck-typed Protocol -- implement only the methods
+    needed, per gepa's own callbacks.py) that writes one clean, regular
+    line per iteration to both stdout and run_dir/progress.log.
+
+    gepa's own run_log.txt is comprehensive but low-level (raw provider
+    errors, retries, every reflection attempt) -- genuinely useful for
+    debugging, not for "is this still going and how's it doing" at a
+    glance. This is the short structured line meant for that: a human
+    watching the terminal, or an agent polling progress.log while the CLI
+    call runs, can answer "where are we" without parsing the verbose log.
+    """
+
+    def __init__(self, path: Path, max_metric_calls: int):
+        self.path = path
+        self.max_metric_calls = max_metric_calls
+
+    def _log(self, line: str) -> None:
+        with self.path.open("a") as f:
+            f.write(line + "\n")
+        print(line)
+
+    def on_optimization_start(self, event) -> None:
+        self.path.write_text("")  # fresh file per run
+        self._log(
+            f"[progress] starting: {event['trainset_size']} trainset / {event['valset_size']} valset "
+            f"row(s), budget {self.max_metric_calls} metric calls"
+        )
+
+    def on_iteration_end(self, event) -> None:
+        state = event["state"]
+        scores = state.program_full_scores_val_set
+        best = max(scores) if scores else None
+        best_str = f"{best:.4f}" if best is not None else "n/a"
+        status = "accepted a new candidate" if event["proposal_accepted"] else "no improvement"
+        self._log(
+            f"[progress] iteration {event['iteration']}: {status}. "
+            f"{state.total_num_evals}/{self.max_metric_calls} metric calls used, "
+            f"{len(state.program_candidates)} candidate(s) so far, best val score {best_str}."
+        )
+
+    def on_optimization_end(self, event) -> None:
+        self._log(
+            f"[progress] done: {event['total_iterations']} iteration(s), "
+            f"{event['total_metric_calls']} metric call(s) used."
+        )
+
+
 def _classification_capability(metric_module) -> tuple[Any, str, str] | None:
     """(classify_fn, positive_label, label_field) if the metric module opts
     in by exposing `classify` + `POSITIVE_LABEL`, else None."""
@@ -83,6 +131,66 @@ def _build_adapter(config: ProjectConfig, project_root: Path, metric_module) -> 
         spec=spec, task_lm=task_lm, score_fn=metric_module.score, judge_lm=judge_lm, **adapter_kwargs
     )
     return adapter, frontier_type
+
+
+def estimate_run(
+    config: ProjectConfig, project_root: str | Path = ".", max_metric_calls: int | None = None
+) -> dict[str, Any]:
+    """A rough, structural estimate of what a real `optimize()` run will
+    cost in LM calls and wall-clock time -- pure arithmetic over the
+    budget and dataset shape, no network calls and no pricing database to
+    keep in sync with live provider rates (which would be its own ongoing
+    maintenance burden and still only approximate). Meant to be shown to
+    the user *before* committing to a real run; deliberately presented as
+    a rough range, not a guarantee -- GEPA's real call count also depends
+    on acceptance rate and how many merges actually trigger, which aren't
+    knowable in advance.
+    """
+    project_root = Path(project_root)
+    budget = max_metric_calls if max_metric_calls is not None else config.max_metric_calls
+    rows = load_dataset(project_root / config.dataset)
+    trainset, valset, testset = split_dataset(
+        rows, val_fraction=config.val_fraction, test_fraction=config.test_fraction, seed=config.seed
+    )
+
+    if config.reflection_minibatch_size is not None:
+        minibatch = config.reflection_minibatch_size
+    elif len(trainset) <= SMALL_DATASET_THRESHOLD:
+        minibatch = max(len(trainset), 1)
+    else:
+        minibatch = 3  # gepa's own default
+
+    # Rough ceiling, not exact: each iteration risks one reflection_lm call;
+    # max_metric_calls itself already counts every task_lm/adapter.evaluate()
+    # call directly, by definition.
+    est_iterations = max(1, budget // max(minibatch, 1))
+    est_task_calls = budget
+    est_reflection_calls = est_iterations
+    est_merge_calls = config.max_merge_invocations if config.use_merge else 0
+    total_calls = est_task_calls + est_reflection_calls + est_merge_calls
+
+    seconds_per_call_low, seconds_per_call_high = 1.5, 5.0
+    # Rows within a batch run concurrently above max_workers=1, so wall-clock
+    # time per batch drops roughly in proportion (not exactly -- rate limits,
+    # provider-side queuing, etc. aren't modeled here).
+    concurrency = max(1, min(config.max_workers, minibatch or 1))
+    est_seconds_low = (total_calls * seconds_per_call_low) / concurrency
+    est_seconds_high = (total_calls * seconds_per_call_high) / concurrency
+
+    return {
+        "budget": budget,
+        "trainset_size": len(trainset),
+        "valset_size": len(valset),
+        "testset_size": len(testset),
+        "minibatch_size": minibatch,
+        "est_iterations": est_iterations,
+        "est_task_calls": est_task_calls,
+        "est_reflection_calls": est_reflection_calls,
+        "est_merge_calls": est_merge_calls,
+        "est_total_calls": total_calls,
+        "est_minutes_low": round(est_seconds_low / 60, 1),
+        "est_minutes_high": round(est_seconds_high / 60, 1),
+    }
 
 
 def validate_metric(config: ProjectConfig, project_root: str | Path = ".", n_rows: int = 2) -> dict[str, Any]:
@@ -195,6 +303,7 @@ def run_optimization(
         # we separately dump our own JSON/HTML views of it below -- that's the human-readable "cached runs" artifact
         track_best_outputs=True,
         display_progress_bar=True,
+        callbacks=[ProgressLogger(run_dir / "progress.log", config.max_metric_calls)],
     )
 
     (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))

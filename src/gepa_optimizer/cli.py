@@ -129,6 +129,89 @@ def cmd_suggest_metric(args: argparse.Namespace) -> None:
     print(f"(available templates: {list(TEMPLATES)})")
 
 
+def cmd_status(args: argparse.Namespace) -> None:
+    """Where this project actually stands right now -- lets anyone (the
+    user or whichever agent picks this back up) re-orient after a break
+    without re-reading the whole conversation from scratch."""
+    project_root = Path(args.path)
+    config_path = project_root / DEFAULT_CONFIG_NAME
+
+    print(f"Project: {project_root.resolve()}\n")
+
+    if not config_path.exists():
+        print(f"No {DEFAULT_CONFIG_NAME} yet. Next: gepa-opt init --goal \"...\" --criteria \"...\"")
+        return
+
+    config = ProjectConfig.load(config_path)
+    print(f"gepa.config.yaml: present")
+    print(f"  goal:     {config.goal or '(not set)'}")
+    print(f"  criteria: {config.criteria or '(not set)'}")
+
+    workflow_path = project_root / config.workflow
+    if workflow_path.exists():
+        edited = workflow_path.read_text() != WORKFLOW_TEMPLATE
+        print(f"workflow.yaml: present, {'edited' if edited else 'UNEDITED -- still the default scaffold'}")
+    else:
+        print("workflow.yaml: MISSING")
+
+    dataset_path = project_root / config.dataset
+    if dataset_path.exists():
+        try:
+            n_rows = len(load_dataset(dataset_path))
+            print(f"dataset ({dataset_path.name}): present, {n_rows} row(s)")
+        except Exception as exc:
+            print(f"dataset ({dataset_path.name}): present but failed to parse: {exc}")
+    else:
+        print(f"dataset ({dataset_path.name}): MISSING")
+
+    metric_path = project_root / config.metric
+    if metric_path.exists():
+        content = metric_path.read_text()
+        unedited_markers = ["TODO: replace", "OTHER_LABEL"]
+        looks_unedited = any(marker in content for marker in unedited_markers)
+        note = " -- still has unedited scaffold markers (e.g. TODO/OTHER_LABEL), probably not reviewed yet" if looks_unedited else ""
+        print(f"metric.py: present{note}")
+    else:
+        print("metric.py: MISSING -- next: gepa-opt inspect-dataset, then suggest-metric")
+
+    run_dir = project_root / config.run_dir
+    report_path = run_dir / "report.md"
+    progress_path = run_dir / "progress.log"
+    if report_path.exists():
+        import datetime
+        mtime = datetime.datetime.fromtimestamp(report_path.stat().st_mtime)
+        best_path = run_dir / "best_candidate.json"
+        best_note = ""
+        if best_path.exists():
+            import json
+
+            best = json.loads(best_path.read_text())
+            best_note = f", best score {best.get('best_score'):.4f}" if "best_score" in best else ""
+        print(f"\nLast run: completed {mtime:%Y-%m-%d %H:%M}{best_note} -- {report_path}")
+    elif progress_path.exists():
+        lines = progress_path.read_text().strip().splitlines()
+        print(f"\nRun in progress or interrupted -- last line: {lines[-1] if lines else '(empty)'}")
+        print(f"  ({progress_path})")
+    else:
+        print("\nNo run yet. Next: gepa-opt validate, then gepa-opt optimize")
+
+
+def cmd_estimate(args: argparse.Namespace) -> None:
+    from .runner import estimate_run  # deferred: gepa import is heavy and optional until needed
+
+    project_root = Path(args.path)
+    config = ProjectConfig.load(project_root / DEFAULT_CONFIG_NAME)
+
+    est = estimate_run(config, project_root=project_root, max_metric_calls=args.max_metric_calls)
+    print(f"Rough estimate for a budget of {est['budget']} metric calls (not a guarantee):")
+    print(f"  dataset: {est['trainset_size']} train / {est['valset_size']} val / {est['testset_size']} test row(s)")
+    print(f"  ~{est['est_task_calls']} task_lm call(s) + ~{est['est_reflection_calls']} reflection_lm call(s)", end="")
+    if est["est_merge_calls"]:
+        print(f" + up to {est['est_merge_calls']} merge call(s)", end="")
+    print(f" = ~{est['est_total_calls']} total LM call(s)")
+    print(f"  ~{est['est_minutes_low']}-{est['est_minutes_high']} minute(s) (assuming 1.5-5s per call)")
+
+
 def cmd_validate(args: argparse.Namespace) -> None:
     from .runner import validate_metric  # deferred: gepa import is heavy and optional until needed
 
@@ -195,12 +278,19 @@ def main(argv: list[str] | None = None) -> None:
     p_inspect = sub.add_parser("inspect-dataset", help="Show the dataset's real columns, value samples, and sample rows")
     p_inspect.set_defaults(func=cmd_inspect_dataset)
 
+    p_status = sub.add_parser("status", help="Where this project stands: what's wired up, what's left")
+    p_status.set_defaults(func=cmd_status)
+
     p_metric = sub.add_parser("suggest-metric", help="Scaffold a scoring function for review/approval")
     p_metric.add_argument("--type", default="exact_match", choices=list(TEMPLATES))
     p_metric.add_argument("--goal")
     p_metric.add_argument("--criteria")
     p_metric.add_argument("--force", action="store_true")
     p_metric.set_defaults(func=cmd_suggest_metric)
+
+    p_estimate = sub.add_parser("estimate", help="Rough LM-call-count and time estimate before committing to a real run")
+    p_estimate.add_argument("--max-metric-calls", type=int, default=None)
+    p_estimate.set_defaults(func=cmd_estimate)
 
     p_validate = sub.add_parser("validate", help="Dry-run the metric against a couple of real rows before spending budget")
     p_validate.add_argument("--n-rows", type=int, default=2)
